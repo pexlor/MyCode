@@ -6,8 +6,8 @@ import (
 )
 
 type Message struct {
-	role    string
-	content string
+	Role    string
+	Content string
 }
 
 type ToolSchema struct {
@@ -17,17 +17,19 @@ type ToolSchema struct {
 }
 
 type StreamRequest struct {
-	Context  context.Context
-	Messages []Message
-	Tools    []ToolSchema
+	Context      context.Context
+	SystemPrompt string
+	Messages     []Message
+	Tools        []ToolSchema
 }
 
 type LLMClient interface {
-	stream(req *StreamRequest) (<-chan StreamEvent, <-chan error)
+	Stream(req *StreamRequest) (<-chan StreamEvent, <-chan error)
 }
 
 // 对话模型参数
 type ModelParm struct {
+	Protocol  string
 	ModelName string
 	Provider  string
 
@@ -44,9 +46,11 @@ type ModelParm struct {
 	ContextWindow int64
 }
 
-func NewClient(parm *ModelParm, systemPrompt string) (*LLMClient, error) {
-	switch parm.Provider {
+func NewClient(parm *ModelParm) (LLMClient, error) {
+	switch parm.Protocol {
+	case "openai-compat":
+		return newOpenAiCompatClient(parm)
 	default:
-		return nil, fmt.Errorf("unknown model provider: %s", parm.Provider)
+		return nil, fmt.Errorf("unknown model protocol: %s", parm.Protocol)
 	}
 }
