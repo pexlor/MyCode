@@ -1,7 +1,7 @@
 package llm
 
 import (
-	"errors"
+	"fmt"
 	"time"
 
 	"github.com/openai/openai-go/v3"
@@ -17,8 +17,11 @@ type OpenAiCompatClient struct {
 }
 
 func newOpenAiCompatClient(parm *ModelParm) (*OpenAiCompatClient, error) {
+	if parm == nil {
+		return nil, fmt.Errorf("%w: model parameters cannot be nil", ErrInvalidConfig)
+	}
 	if parm.APIKey == "" || parm.BaseURL == "" {
-		return nil, errors.New("APIKey or BaseURL is empty")
+		return nil, fmt.Errorf("%w: APIKey and BaseURL are required", ErrInvalidConfig)
 	}
 	client := openai.NewClient(
 		option.WithAPIKey(parm.APIKey),
@@ -33,6 +36,12 @@ func newOpenAiCompatClient(parm *ModelParm) (*OpenAiCompatClient, error) {
 func (c *OpenAiCompatClient) Stream(req *StreamRequest) (<-chan StreamEvent, <-chan error) {
 	eventsChan := make(chan StreamEvent, 128)
 	errsChan := make(chan error, 128)
+	if req == nil || req.Context == nil {
+		close(eventsChan)
+		errsChan <- fmt.Errorf("%w: request and context are required", ErrInvalidRequest)
+		close(errsChan)
+		return eventsChan, errsChan
+	}
 
 	// 构建消息
 	messages := buildChatCompletionMessages(req)
@@ -75,8 +84,10 @@ func (c *OpenAiCompatClient) Stream(req *StreamRequest) (<-chan StreamEvent, <-c
 		for {
 			select {
 			case <-ctx.Done():
+				errsChan <- ctx.Err()
 				return
 			case <-idle.C:
+				errsChan <- ErrStreamIdleTimeout
 				return
 			case onechunk := <-streamChan:
 				if onechunk.finished {
