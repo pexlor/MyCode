@@ -6,14 +6,22 @@ import (
 )
 
 type Message struct {
-	Role    string
-	Content string
+	Role       string
+	Content    string
+	ToolCallID string
+	ToolCalls  []ToolCall
+}
+
+type ToolCall struct {
+	ID        string
+	Name      string
+	Arguments string
 }
 
 type ToolSchema struct {
-	name        string
-	description string
-	parameters  map[string]any
+	Name        string
+	Description string
+	Parameters  map[string]any
 }
 
 type StreamRequest struct {

@@ -26,7 +26,8 @@ type ToolCallStart struct {
 }
 
 type ToolCallStream struct {
-	Text string
+	ToolID string
+	Text   string
 }
 
 type ToolCallComplete struct {

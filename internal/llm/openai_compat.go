@@ -1,7 +1,9 @@
 package llm
 
 import (
+	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/openai/openai-go/v3"
@@ -51,14 +53,26 @@ func (c *OpenAiCompatClient) Stream(req *StreamRequest) (<-chan StreamEvent, <-c
 
 		ctx := req.Context
 
+		// 构建工具
+		var tools []openai.ChatCompletionToolUnionParam
+		for _, t := range req.Tools {
+			tools = append(tools, openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
+				Name:        t.Name,
+				Description: openai.String(t.Description),
+				Parameters:  openai.FunctionParameters(t.Parameters),
+			}))
+		}
+
 		// 构建请求参数
 		reqParams := openai.ChatCompletionNewParams{
 			Model:    c.modelParm.ModelName,
 			Messages: messages,
+			Tools:    tools,
 			StreamOptions: openai.ChatCompletionStreamOptionsParam{
 				IncludeUsage: param.NewOpt(true),
 			},
 		}
+
 		// 发起请求
 		stream := c.client.Chat.Completions.NewStreaming(ctx, reqParams)
 		defer stream.Close()
@@ -79,6 +93,13 @@ func (c *OpenAiCompatClient) Stream(req *StreamRequest) (<-chan StreamEvent, <-c
 			}
 			streamChan <- steamChunk{finished: true}
 		}()
+
+		type toolCallAccum struct {
+			id        string
+			name      string
+			arguments string
+		}
+		toolCalls := make(map[int64]*toolCallAccum)
 
 		// 事件处理
 		for {
@@ -102,14 +123,55 @@ func (c *OpenAiCompatClient) Stream(req *StreamRequest) (<-chan StreamEvent, <-c
 				}
 				choice := chunk.Choices[0]
 				delta := choice.Delta
-
+				// text content delta
 				if delta.Content != "" {
 					eventsChan <- TextStream{Text: delta.Content}
 				}
 
-				// finish
-				if chunk.Choices[0].FinishReason == "stop" {
-					eventsChan <- StreamEnd{}
+				// Accumulate tool call deltas. Arguments may span multiple chunks.
+				for _, tc := range delta.ToolCalls {
+					call := toolCalls[tc.Index]
+					if call == nil {
+						call = &toolCallAccum{}
+						toolCalls[tc.Index] = call
+					}
+					if tc.ID != "" {
+						call.id = tc.ID
+					}
+					if tc.Function.Name != "" {
+						call.name = tc.Function.Name
+						eventsChan <- ToolCallStart{ToolName: call.name, ToolID: call.id}
+					}
+					if tc.Function.Arguments != "" {
+						call.arguments += tc.Function.Arguments
+						eventsChan <- ToolCallStream{ToolID: call.id, Text: tc.Function.Arguments}
+					}
+				}
+
+				if choice.FinishReason == "tool_calls" {
+					indices := make([]int64, 0, len(toolCalls))
+					for index := range toolCalls {
+						indices = append(indices, index)
+					}
+					sort.Slice(indices, func(i, j int) bool { return indices[i] < indices[j] })
+					for _, index := range indices {
+						call := toolCalls[index]
+						arguments := make(map[string]any)
+						if call.arguments != "" {
+							if err := json.Unmarshal([]byte(call.arguments), &arguments); err != nil {
+								errsChan <- fmt.Errorf("decode arguments for tool %q: %w", call.name, err)
+								return
+							}
+						}
+						eventsChan <- ToolCallComplete{
+							ToolID:    call.id,
+							ToolName:  call.name,
+							Arguments: arguments,
+						}
+					}
+					eventsChan <- StreamEnd{StopReason: choice.FinishReason}
+				} else if choice.FinishReason == "stop" {
+					eventsChan <- StreamEnd{StopReason: choice.FinishReason}
 				}
 				idle.Reset(openaiStreamIdleTimeout)
 			}
@@ -126,10 +188,28 @@ func buildChatCompletionMessages(req *StreamRequest) []openai.ChatCompletionMess
 		result = append(result, openai.SystemMessage(req.SystemPrompt))
 	}
 	for _, m := range req.Messages {
-		if m.Role == "assistant" {
-			result = append(result, openai.AssistantMessage(m.Content))
-		} else {
-			// User messages
+		// todo 添加tool
+		switch m.Role {
+		case "assistant":
+			message := openai.AssistantMessage(m.Content)
+			for _, call := range m.ToolCalls {
+				message.OfAssistant.ToolCalls = append(
+					message.OfAssistant.ToolCalls,
+					openai.ChatCompletionMessageToolCallUnionParam{
+						OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
+							ID: call.ID,
+							Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
+								Name:      call.Name,
+								Arguments: call.Arguments,
+							},
+						},
+					},
+				)
+			}
+			result = append(result, message)
+		case "tool":
+			result = append(result, openai.ToolMessage(m.Content, m.ToolCallID))
+		default:
 			result = append(result, openai.UserMessage(m.Content))
 		}
 	}
