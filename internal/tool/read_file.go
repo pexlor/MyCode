@@ -24,11 +24,11 @@ type ReadFileTool struct {
 func (t *ReadFileTool) Name() string        { return "ReadFile" }
 func (t *ReadFileTool) Description() string { return ReadFileDescription }
 
-func (t *ReadFileTool) Schema() map[string]any {
-	return map[string]any{
-		"name":        t.Name(),
-		"description": t.Description(),
-		"input_schema": map[string]any{
+func (t *ReadFileTool) Schema() *ToolSchema {
+	return &ToolSchema{
+		Name:        t.Name(),
+		Description: t.Description(),
+		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"file_path": map[string]any{"type": "string", "description": "Absolute or relative path to the file to read"},

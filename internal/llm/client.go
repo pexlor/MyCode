@@ -1,16 +1,11 @@
 package llm
 
 import (
+	"MyCode/internal/message"
+	"MyCode/internal/tool"
 	"context"
 	"fmt"
 )
-
-type Message struct {
-	Role       string
-	Content    string
-	ToolCallID string
-	ToolCalls  []ToolCall
-}
 
 type ToolCall struct {
 	ID        string
@@ -18,17 +13,11 @@ type ToolCall struct {
 	Arguments string
 }
 
-type ToolSchema struct {
-	Name        string
-	Description string
-	Parameters  map[string]any
-}
-
 type StreamRequest struct {
 	Context      context.Context
 	SystemPrompt string
-	Messages     []Message
-	Tools        []ToolSchema
+	Messages     []message.Message
+	Tools        []*tool.ToolSchema
 }
 
 type LLMClient interface {

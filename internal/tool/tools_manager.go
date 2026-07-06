@@ -18,8 +18,8 @@ func (m *ToolsManager) GetTool(name string) Tool {
 	return m.tools[name]
 }
 
-func (m *ToolsManager) BuildAllSchemas() []map[string]any {
-	schemas := make([]map[string]any, 0, len(m.tools))
+func (m *ToolsManager) BuildAllSchemas() []*ToolSchema {
+	schemas := make([]*ToolSchema, 0, len(m.tools))
 	for _, t := range m.tools {
 		base := t.Schema()
 		schemas = append(schemas, base)
@@ -30,5 +30,6 @@ func (m *ToolsManager) BuildAllSchemas() []map[string]any {
 func CreateDefaultTools() *ToolsManager {
 	toolsManager := NewToolsManager()
 	toolsManager.RegisterTool(&ReadFileTool{})
+	// todo : 添加其他工具
 	return toolsManager
 }

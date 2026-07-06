@@ -7,9 +7,15 @@ type ToolResult struct {
 	IsError bool
 }
 
+type ToolSchema struct {
+	Name        string
+	Description string
+	Parameters  map[string]any
+}
+
 type Tool interface {
 	Name() string
 	Description() string
-	Schema() map[string]any
+	Schema() *ToolSchema
 	Execute(ctx context.Context, args map[string]any) ToolResult
 }

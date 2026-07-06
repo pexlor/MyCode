@@ -1,4 +1,4 @@
-package session
+package message
 
 // 工具调用
 type ToolUseBlock struct {
@@ -20,14 +20,16 @@ type ThinkingBlock struct {
 	// Signature string
 }
 
+type Message struct {
+	Role           string            // 消息角色
+	Content        string            // 普通消息内容
+	ThinkingBlocks []ThinkingBlock   // 思考消息内容
+	ToolUses       []ToolUseBlock    // 工具调用内容
+	ToolResults    []ToolResultBlock // 工具调用结果
+}
+
 // 消息管理
 type MessageManager struct {
-	history []struct {
-		Role           string            // 消息角色
-		Content        string            // 消息内容
-		ThinkingBlocks []ThinkingBlock   // 思考
-		ToolUses       []ToolUseBlock    // 工具
-		ToolResults    []ToolResultBlock // 工具调用结果
-	}
-	// ltmInjected bool // 是否已经注入长期记忆
+	SystemPrompt string
+	History      []Message // 顺序写入
 }

@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"MyCode/internal/message"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -183,33 +184,46 @@ func (c *OpenAiCompatClient) Stream(req *StreamRequest) (<-chan StreamEvent, <-c
 
 func buildChatCompletionMessages(req *StreamRequest) []openai.ChatCompletionMessageParamUnion {
 	var result []openai.ChatCompletionMessageParamUnion
-
+	// 添加系统提示词
 	if req.SystemPrompt != "" {
 		result = append(result, openai.SystemMessage(req.SystemPrompt))
 	}
+	// 添加历史消息
 	for _, m := range req.Messages {
-		// todo 添加tool
+		// 添加 tool
 		switch m.Role {
-		case "assistant":
-			message := openai.AssistantMessage(m.Content)
-			for _, call := range m.ToolCalls {
-				message.OfAssistant.ToolCalls = append(
-					message.OfAssistant.ToolCalls,
-					openai.ChatCompletionMessageToolCallUnionParam{
-						OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
-							ID: call.ID,
-							Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
-								Name:      call.Name,
-								Arguments: call.Arguments,
+		case message.ASSISTANT:
+			// 模型生成的内容
+			if len(m.ToolUses) > 0 {
+				var message openai.ChatCompletionAssistantMessageParam
+				if m.Content != "" {
+					message.Content.OfString = param.NewOpt(m.Content)
+				}
+				// 模型工具调用
+				for _, toolUse := range m.ToolUses {
+					argsJSON, _ := json.Marshal(toolUse.Arguments)
+					message.ToolCalls = append(
+						message.ToolCalls,
+						openai.ChatCompletionMessageToolCallUnionParam{
+							OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
+								ID: toolUse.ToolUseID,
+								Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
+									Name:      toolUse.ToolName,
+									Arguments: string(argsJSON),
+								},
 							},
 						},
-					},
-				)
+					)
+				}
+				result = append(result, openai.ChatCompletionMessageParamUnion{OfAssistant: &message})
+			} else if m.Content != "" {
+				result = append(result, openai.AssistantMessage(m.Content))
 			}
-			result = append(result, message)
-		case "tool":
-			result = append(result, openai.ToolMessage(m.Content, m.ToolCallID))
-		default:
+		case message.TOOL:
+			for _, toolResult := range m.ToolResults {
+				result = append(result, openai.ToolMessage(toolResult.Content, toolResult.ToolUseID))
+			}
+		case message.USER:
 			result = append(result, openai.UserMessage(m.Content))
 		}
 	}
