@@ -33,3 +33,31 @@ type MessageManager struct {
 	SystemPrompt string
 	History      []Message // 顺序写入
 }
+
+func (mm *MessageManager) AddToolUses(toolUses []ToolUseBlock) {
+	mm.History = append(mm.History, Message{
+		Role:     ASSISTANT,
+		ToolUses: toolUses,
+	})
+}
+
+func (mm *MessageManager) AddToolResult(toolResults []ToolResultBlock) {
+	mm.History = append(mm.History, Message{
+		Role:        TOOL,
+		ToolResults: toolResults,
+	})
+}
+
+func (mm *MessageManager) AddThink(thinkingBlocks []ThinkingBlock) {
+	mm.History = append(mm.History, Message{
+		Role:           ASSISTANT,
+		ThinkingBlocks: thinkingBlocks,
+	})
+}
+
+func (mm *MessageManager) AddText(content string) {
+	mm.History = append(mm.History, Message{
+		Role:    USER,
+		Content: content,
+	})
+}
