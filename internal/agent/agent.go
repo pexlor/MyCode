@@ -181,12 +181,7 @@ func (a *Agent) executeTool(call llm.ToolCallComplete) tool.ToolResult {
 		return tool.ToolResult{Output: "tool call is missing id or name", IsError: true}
 	}
 
-	registeredTool := a.toolManager.GetTool(call.ToolName)
-	if registeredTool == nil {
-		return tool.ToolResult{Output: fmt.Sprintf("tool %q is not registered", call.ToolName), IsError: true}
-	}
-
-	return registeredTool.Execute(a.ctx, call.Arguments)
+	return a.toolManager.Execute(a.ctx, call.ToolName, call.Arguments)
 }
 
 func toToolUseBlocks(toolCalls []llm.ToolCallComplete) []message.ToolUseBlock {

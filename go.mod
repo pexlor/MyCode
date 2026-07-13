@@ -2,7 +2,10 @@ module MyCode
 
 go 1.24.3
 
-require github.com/openai/openai-go/v3 v3.41.0
+require (
+	github.com/openai/openai-go/v3 v3.41.0
+	gopkg.in/yaml.v3 v3.0.1
+)
 
 require (
 	github.com/tidwall/gjson v1.18.0 // indirect

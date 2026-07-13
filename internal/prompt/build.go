@@ -1,22 +1,26 @@
 package prompt
 
 import (
+	_ "embed"
 	"os"
 	"strings"
 	"time"
 )
 
-const systemPromptPath = "/Users/fengrui03/Desktop/MyCode/internal/prompt/system_prompt.md"
+//go:embed system_prompt.md
+var staticSystemPrompt string
 
 func BuildSystemPrompt() (string, error) {
 	staticPrompt, err := buildStaticPrompt()
 	if err != nil {
 		return "", err
 	}
+
 	environmentPrompt, err := buildEnvironmentPrompt()
 	if err != nil {
 		return "", err
 	}
+
 	// todo: 后续添加 Agent.md
 	sections := []string{
 		staticPrompt,
@@ -44,8 +48,7 @@ func buildEnvironmentPrompt() (string, error) {
 }
 
 func buildStaticPrompt() (string, error) {
-	staticPrompt, err := os.ReadFile(systemPromptPath)
-	return string(staticPrompt), err
+	return staticSystemPrompt, nil
 }
 
 func compactSections(sections []string) []string {
