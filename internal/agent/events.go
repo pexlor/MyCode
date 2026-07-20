@@ -1,5 +1,7 @@
 package agent
 
+import "MyCode/internal/llm"
+
 type AgentEvent interface{ agentEvent() }
 
 type TextEvent struct {
@@ -35,6 +37,7 @@ type ToolResultEvent struct {
 
 type DoneEvent struct {
 	StopReason string
+	Usage      llm.UsageInfo
 }
 
 type ErrorEvent struct {

@@ -37,11 +37,12 @@ func runInteractive() {
 
 	printWelcome()
 
-	runner, err := initAgent()
+	runner, cleanup, err := initAgent()
 	if err != nil {
 		printError("agent 初始化失败", err)
 		return
 	}
+	defer cleanup()
 
 	messageManager, err := initMessageManager()
 	if err != nil {
@@ -81,7 +82,7 @@ func runInteractive() {
 	}
 }
 
-func initAgent() (*agent.Agent, error) {
+func initAgent() (*agent.Agent, func(), error) {
 	// 后续支持可修改
 	apiKey := "sk-72683ab6f2174c81bc7d05d13b4c7296"
 	protocol := "openai-compat"
@@ -97,19 +98,22 @@ func initAgent() (*agent.Agent, error) {
 	})
 
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	ctx := context.Background()
 
-	tools := tool.CreateDefaultTools()
-	// todo : 后续支持工具筛选
+	tools, cleanup, err := tool.CreateDefaultToolsWithMCP(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	runner, err := agent.NewAgent(ctx, client, tools)
 	if err != nil {
-		return nil, err
+		cleanup()
+		return nil, nil, err
 	}
-	return runner, nil
+	return runner, cleanup, nil
 }
 
 func initMessageManager() (*message.MessageManager, error) {
@@ -145,6 +149,11 @@ func handleAgentEvent(event agent.AgentEvent) error {
 		}
 		fmt.Fprintf(os.Stderr, "%s%s%s %s%s%s\n", colorDim, toolLine("result", ev.ToolName), colorReset, color, status, colorReset)
 	case agent.DoneEvent:
+		fmt.Fprintf(os.Stderr, "\n%stokens: input %d | output %d | total %d", colorDim, ev.Usage.InputTokens, ev.Usage.OutputTokens, ev.Usage.TotalTokens)
+		if ev.Usage.CacheReadTokens > 0 {
+			fmt.Fprintf(os.Stderr, " | cache read %d", ev.Usage.CacheReadTokens)
+		}
+		fmt.Fprint(os.Stderr, colorReset)
 		if ev.StopReason != "" {
 			fmt.Fprintf(os.Stderr, "\n%sdone: %s%s\n\n", colorDim, ev.StopReason, colorReset)
 		} else {

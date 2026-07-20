@@ -24,8 +24,12 @@ func TestPathValidatorWorkspaceAndTraversal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("inside path rejected: %v", err)
 	}
-	if !isWithin(root, inside) {
-		t.Fatalf("resolved path %q is outside %q", inside, root)
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isWithin(canonicalRoot, inside) {
+		t.Fatalf("resolved path %q is outside %q", inside, canonicalRoot)
 	}
 	if _, err := v.Validate(filepath.Join("..", "outside.txt"), root); err == nil {
 		t.Fatal("path traversal was allowed")

@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-const DefaultMaxIterations = 8
+const DefaultMaxIterations = 800
 
 type Agent struct {
 	ctx           context.Context
@@ -44,6 +44,7 @@ func (a *Agent) Run(mm *message.MessageManager) <-chan AgentEvent {
 
 	go func() {
 		defer close(agentEventCh)
+		var totalUsage llm.UsageInfo
 
 		if err := a.validate(mm); err != nil {
 			sendAgentEvent(ctx, agentEventCh, ErrorEvent{Err: err})
@@ -59,7 +60,7 @@ func (a *Agent) Run(mm *message.MessageManager) <-chan AgentEvent {
 				Tools:        toolSchemas,
 			})
 
-			assistantText, toolCalls, stopReason, err := a.handleStream(events, errs, agentEventCh)
+			assistantText, toolCalls, stopReason, usage, err := a.handleStream(events, errs, agentEventCh)
 			if err != nil {
 				sendAgentEvent(a.ctx, agentEventCh, ErrorEvent{Err: err})
 				return
@@ -72,9 +73,10 @@ func (a *Agent) Run(mm *message.MessageManager) <-chan AgentEvent {
 						Content: assistantText,
 					})
 				}
-				sendAgentEvent(a.ctx, agentEventCh, DoneEvent{StopReason: stopReason})
+				sendAgentEvent(a.ctx, agentEventCh, DoneEvent{StopReason: stopReason, Usage: addUsage(totalUsage, usage)})
 				return
 			}
+			totalUsage = addUsage(totalUsage, usage)
 
 			mm.History = append(mm.History, message.Message{
 				Role:     message.ASSISTANT,
@@ -82,21 +84,7 @@ func (a *Agent) Run(mm *message.MessageManager) <-chan AgentEvent {
 				ToolUses: toToolUseBlocks(toolCalls),
 			})
 
-			toolResults := make([]message.ToolResultBlock, 0, len(toolCalls))
-			for _, call := range toolCalls {
-				result := a.executeTool(call)
-				toolResults = append(toolResults, message.ToolResultBlock{
-					ToolUseID: call.ToolID,
-					Content:   result.Output,
-					IsError:   result.IsError,
-				})
-				sendAgentEvent(a.ctx, agentEventCh, ToolResultEvent{
-					ToolUseID: call.ToolID,
-					ToolName:  call.ToolName,
-					Content:   result.Output,
-					IsError:   result.IsError,
-				})
-			}
+			toolResults := a.executeTools(toolCalls, agentEventCh)
 			mm.AddToolResult(toolResults)
 		}
 
@@ -132,10 +120,11 @@ func (a *Agent) validate(mm *message.MessageManager) error {
 	return nil
 }
 
-func (a *Agent) handleStream(events <-chan llm.StreamEvent, errs <-chan error, out chan<- AgentEvent) (string, []llm.ToolCallComplete, string, error) {
+func (a *Agent) handleStream(events <-chan llm.StreamEvent, errs <-chan error, out chan<- AgentEvent) (string, []llm.ToolCallComplete, string, llm.UsageInfo, error) {
 	var assistantText strings.Builder
 	var toolCalls []llm.ToolCallComplete
 	stopReason := ""
+	var usage llm.UsageInfo
 
 	for events != nil || errs != nil {
 		select {
@@ -159,6 +148,7 @@ func (a *Agent) handleStream(events <-chan llm.StreamEvent, errs <-chan error, o
 				sendAgentEvent(a.ctx, out, ToolCallCompleteEvent{ToolUseID: ev.ToolID, ToolName: ev.ToolName, Arguments: ev.Arguments})
 			case llm.StreamEnd:
 				stopReason = ev.StopReason
+				usage = ev.Usage
 			}
 		case err, ok := <-errs:
 			if !ok {
@@ -166,14 +156,24 @@ func (a *Agent) handleStream(events <-chan llm.StreamEvent, errs <-chan error, o
 				continue
 			}
 			if err != nil {
-				return assistantText.String(), toolCalls, stopReason, err
+				return assistantText.String(), toolCalls, stopReason, usage, err
 			}
 		case <-a.ctx.Done():
-			return assistantText.String(), toolCalls, stopReason, a.ctx.Err()
+			return assistantText.String(), toolCalls, stopReason, usage, a.ctx.Err()
 		}
 	}
 
-	return assistantText.String(), toolCalls, stopReason, nil
+	return assistantText.String(), toolCalls, stopReason, usage, nil
+}
+
+func addUsage(u, other llm.UsageInfo) llm.UsageInfo {
+	return llm.UsageInfo{
+		InputTokens:         u.InputTokens + other.InputTokens,
+		OutputTokens:        u.OutputTokens + other.OutputTokens,
+		TotalTokens:         u.TotalTokens + other.TotalTokens,
+		CacheReadTokens:     u.CacheReadTokens + other.CacheReadTokens,
+		CacheCreationTokens: u.CacheCreationTokens + other.CacheCreationTokens,
+	}
 }
 
 func (a *Agent) executeTool(call llm.ToolCallComplete) tool.ToolResult {
@@ -182,6 +182,41 @@ func (a *Agent) executeTool(call llm.ToolCallComplete) tool.ToolResult {
 	}
 
 	return a.toolManager.Execute(a.ctx, call.ToolName, call.Arguments)
+}
+
+type completedToolCall struct {
+	index  int
+	call   llm.ToolCallComplete
+	result tool.ToolResult
+}
+
+// executeTools starts every tool call in an iteration concurrently. Results are
+// returned in call order because tool-result protocols associate the response
+// sequence with the corresponding assistant tool-use sequence.
+func (a *Agent) executeTools(calls []llm.ToolCallComplete, events chan<- AgentEvent) []message.ToolResultBlock {
+	completed := make(chan completedToolCall, len(calls))
+	for index, call := range calls {
+		go func(index int, call llm.ToolCallComplete) {
+			completed <- completedToolCall{index: index, call: call, result: a.executeTool(call)}
+		}(index, call)
+	}
+
+	results := make([]message.ToolResultBlock, len(calls))
+	for range calls {
+		outcome := <-completed
+		results[outcome.index] = message.ToolResultBlock{
+			ToolUseID: outcome.call.ToolID,
+			Content:   outcome.result.Output,
+			IsError:   outcome.result.IsError,
+		}
+		sendAgentEvent(a.ctx, events, ToolResultEvent{
+			ToolUseID: outcome.call.ToolID,
+			ToolName:  outcome.call.ToolName,
+			Content:   outcome.result.Output,
+			IsError:   outcome.result.IsError,
+		})
+	}
+	return results
 }
 
 func toToolUseBlocks(toolCalls []llm.ToolCallComplete) []message.ToolUseBlock {

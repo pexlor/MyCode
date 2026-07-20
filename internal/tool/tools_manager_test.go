@@ -60,7 +60,11 @@ func TestExecuteUsesResolvedFilePath(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("execution failed: %#v", result)
 	}
-	want := filepath.Join(workspace, "relative.txt")
+	canonicalWorkspace, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(canonicalWorkspace, "relative.txt")
 	if arguments["file_path"] != want {
 		t.Fatalf("resolved file_path = %#v, want %q", arguments["file_path"], want)
 	}

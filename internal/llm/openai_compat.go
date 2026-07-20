@@ -101,6 +101,8 @@ func (c *OpenAiCompatClient) Stream(req *StreamRequest) (<-chan StreamEvent, <-c
 			arguments string
 		}
 		toolCalls := make(map[int64]*toolCallAccum)
+		var stopReason string
+		var usage UsageInfo
 
 		// 事件处理
 		for {
@@ -115,10 +117,20 @@ func (c *OpenAiCompatClient) Stream(req *StreamRequest) (<-chan StreamEvent, <-c
 				if onechunk.finished {
 					if err := stream.Err(); err != nil {
 						errsChan <- err
+					} else if stopReason != "" {
+						eventsChan <- StreamEnd{StopReason: stopReason, Usage: usage}
 					}
 					return
 				}
 				chunk := onechunk.chunk
+				if chunk.Usage.TotalTokens != 0 {
+					usage = UsageInfo{
+						InputTokens:     chunk.Usage.PromptTokens,
+						OutputTokens:    chunk.Usage.CompletionTokens,
+						TotalTokens:     chunk.Usage.TotalTokens,
+						CacheReadTokens: chunk.Usage.PromptTokensDetails.CachedTokens,
+					}
+				}
 				if len(chunk.Choices) == 0 {
 					continue
 				}
@@ -150,6 +162,7 @@ func (c *OpenAiCompatClient) Stream(req *StreamRequest) (<-chan StreamEvent, <-c
 				}
 
 				if choice.FinishReason == "tool_calls" {
+					stopReason = choice.FinishReason
 					indices := make([]int64, 0, len(toolCalls))
 					for index := range toolCalls {
 						indices = append(indices, index)
@@ -170,9 +183,8 @@ func (c *OpenAiCompatClient) Stream(req *StreamRequest) (<-chan StreamEvent, <-c
 							Arguments: arguments,
 						}
 					}
-					eventsChan <- StreamEnd{StopReason: choice.FinishReason}
 				} else if choice.FinishReason == "stop" {
-					eventsChan <- StreamEnd{StopReason: choice.FinishReason}
+					stopReason = choice.FinishReason
 				}
 				idle.Reset(openaiStreamIdleTimeout)
 			}

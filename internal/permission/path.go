@@ -69,6 +69,13 @@ func (v *PathValidator) Validate(path, workingDirectory string) (string, error) 
 		return "", fmt.Errorf("path %q escapes workspace %q", resolved, v.workspace)
 	}
 	for _, denied := range v.protected {
+		// The workspace is an explicit trust boundary. On macOS temporary
+		// directories live below /var (usually /private/var), so applying a
+		// broad protected ancestor to the workspace itself would make every
+		// operation in an otherwise valid workspace unusable.
+		if isWithin(denied, v.workspace) {
+			continue
+		}
 		// A filesystem root protects the root object itself. Treating it as a
 		// subtree would also deny every legitimate workspace on that volume.
 		isVolumeRoot := filepath.Dir(denied) == denied

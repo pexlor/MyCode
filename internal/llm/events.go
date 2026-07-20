@@ -37,10 +37,11 @@ type ToolCallComplete struct {
 }
 
 type UsageInfo struct {
-	InputTokens         int
-	OutputTokens        int
-	CacheReadTokens     int
-	CacheCreationTokens int
+	InputTokens         int64
+	OutputTokens        int64
+	TotalTokens         int64
+	CacheReadTokens     int64
+	CacheCreationTokens int64
 }
 
 type StreamEnd struct {

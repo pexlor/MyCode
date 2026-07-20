@@ -71,6 +71,10 @@ func (m *ToolsManager) BuildAllSchemas() []*ToolSchema {
 func CreateDefaultTools() *ToolsManager {
 	toolsManager := NewToolsManager()
 	toolsManager.RegisterTool(&ReadFileTool{})
+	toolsManager.RegisterTool(&WriteFileTool{})
+	toolsManager.RegisterTool(&EditFileTool{})
+	toolsManager.RegisterTool(&GrepTool{})
+	toolsManager.RegisterTool(&GlobTool{})
 	toolsManager.RegisterTool(NewBashTool())
 	workspace, err := os.Getwd()
 	if err == nil {
@@ -96,6 +100,10 @@ func CreateDefaultTools() *ToolsManager {
 					CanDelete: true,
 				},
 			}
+			policy.Tools["writefile"] = permission.ToolPolicy{Permission: permission.Allow, ToolPermission: permission.ToolPermission{CanWrite: true}}
+			policy.Tools["editfile"] = permission.ToolPolicy{Permission: permission.Allow, ToolPermission: permission.ToolPermission{CanWrite: true}}
+			policy.Tools["grep"] = permission.ToolPolicy{Permission: permission.Allow, ToolPermission: permission.ToolPermission{ReadOnly: true}}
+			policy.Tools["glob"] = permission.ToolPolicy{Permission: permission.Allow, ToolPermission: permission.ToolPermission{ReadOnly: true}}
 		} else {
 			// An unreadable explicit policy location also fails closed.
 			policy.Tools = make(map[string]permission.ToolPolicy)
@@ -105,7 +113,6 @@ func CreateDefaultTools() *ToolsManager {
 			toolsManager.SetPermissionManager(manager)
 		}
 	}
-	// todo : 添加其他工具
 	return toolsManager
 }
 
@@ -113,7 +120,7 @@ func buildPermissionRequest(name string, args map[string]any) permission.Permiss
 	request := permission.PermissionRequest{ToolName: name, Arguments: args}
 	lowerName := strings.ToLower(name)
 	switch {
-	case strings.Contains(lowerName, "read"):
+	case strings.Contains(lowerName, "read"), strings.Contains(lowerName, "grep"), strings.Contains(lowerName, "glob"):
 		request.Action = "read"
 		request.RiskLevel = permission.Safe
 	case strings.Contains(lowerName, "delete"), strings.Contains(lowerName, "remove"):
