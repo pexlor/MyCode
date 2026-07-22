@@ -68,6 +68,20 @@ func (m *ToolsManager) BuildAllSchemas() []*ToolSchema {
 	return schemas
 }
 
+// BuildSchemas returns schemas in the requested order. It does not alter the
+// registered tools or bypass execution-time permission checks.
+func (m *ToolsManager) BuildSchemas(names []string) ([]*ToolSchema, error) {
+	schemas := make([]*ToolSchema, 0, len(names))
+	for _, name := range names {
+		registered := m.GetTool(name)
+		if registered == nil {
+			return nil, fmt.Errorf("tool %q is not registered", name)
+		}
+		schemas = append(schemas, registered.Schema())
+	}
+	return schemas, nil
+}
+
 func CreateDefaultTools() *ToolsManager {
 	toolsManager := NewToolsManager()
 	toolsManager.RegisterTool(&ReadFileTool{})

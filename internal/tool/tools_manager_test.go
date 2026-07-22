@@ -69,3 +69,21 @@ func TestExecuteUsesResolvedFilePath(t *testing.T) {
 		t.Fatalf("resolved file_path = %#v, want %q", arguments["file_path"], want)
 	}
 }
+
+func TestBuildSchemasReturnsRequestedSubset(t *testing.T) {
+	manager := NewToolsManager()
+	manager.RegisterTool(&ReadFileTool{})
+	manager.RegisterTool(&GrepTool{})
+	manager.RegisterTool(&GlobTool{})
+
+	schemas, err := manager.BuildSchemas([]string{"ReadFile", "Grep"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(schemas) != 2 || schemas[0].Name != "ReadFile" || schemas[1].Name != "Grep" {
+		t.Fatalf("schemas = %#v", schemas)
+	}
+	if _, err := manager.BuildSchemas([]string{"Missing"}); err == nil {
+		t.Fatal("expected unknown tool error")
+	}
+}
