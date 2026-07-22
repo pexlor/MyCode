@@ -8,7 +8,7 @@ MyCode 当前通过 `message.MessageManager.History` 保存会话，并在每次
 下降或请求超过模型窗口。
 
 本设计在不引入 Redis、MySQL、向量索引和多 Agent 的前提下，实现一个可落地的
-MVP。系统采用四层管线：
+MVP。系统采用四级触发式管理：
 
 0. 按需加载，避免无关内容进入上下文；
 1. 工具结果卸载，将新产生的大结果转为可恢复引用；
@@ -50,8 +50,10 @@ MVP。系统采用四层管线：
 
 ### 3.2 越早治理，信息损失越小
 
-每次模型请求前固定按第 0、1、2、3 层执行。第 0 层成本最低，第 3 层信息损失
-最大，只作为最后兜底。完成第 3 层后必须重新执行规则注入和预算校验。
+四级机制不是让每条消息依次经历四次变换。第 0 层在每次请求前装配视图；第 1 层
+只在新工具结果产生时判断；第 2 层只在工具历史超出预算时触发；第 3 层只在整体
+上下文达到软阈值且存在新的可压缩 Turn 时触发。完成第 3 层后必须重新执行规则
+注入和预算校验。
 
 ### 3.3 完整轮次是压缩边界
 
@@ -76,10 +78,11 @@ user
 Agent.Run
   -> ConversationStore 追加原始记录
   -> ContextManager.Build
-       -> DemandLoader                 第 0 层
-       -> ResultOffloader              第 1 层
-       -> StaleResultEvictor           第 2 层
-       -> ConversationCompactor        第 3 层，按预算触发
+       -> Load Active Summary + Messages After Checkpoint
+       -> DemandLoader                 第 0 层，每次装配
+       -> ResultOffloader              第 1 层，有新工具结果时触发
+       -> StaleResultEvictor           第 2 层，工具历史超预算时触发
+       -> ConversationCompactor        第 3 层，整体超预算且有新增量时触发
        -> PersistentRuleInjector       压缩后重新注入
        -> BudgetGuard                  硬预算校验
   -> LLMClient.Stream(ContextView)
@@ -115,6 +118,32 @@ func (m *ContextManager) Build(
 
 Agent 负责追加原始事件和消费 `ContextView`，不持有具体压缩算法。
 
+`Build` 必须先读取最新生效的摘要检查点，只将该检查点之后的原始消息加入候选
+视图。其核心语义为：
+
+```go
+summary, err := m.store.ActiveSummary(ctx, in.SessionID)
+if err != nil {
+	return nil, err
+}
+
+var messages []StoredMessage
+if summary == nil {
+	messages, err = m.store.ListMessages(ctx, in.SessionID)
+} else {
+	messages, err = m.store.ListMessagesAfter(
+		ctx,
+		in.SessionID,
+		summary.CoveredThroughMessageID,
+	)
+}
+
+view := NewContextView(summary, messages)
+```
+
+已经被生效摘要覆盖的消息继续保存在 transcript 中，但不会在下一次 Build 时重新
+进入候选视图，也不会被重复压缩。
+
 ## 5. 数据模型与存储
 
 ### 5.1 会话目录
@@ -145,7 +174,9 @@ Agent 负责追加原始事件和消费 `ContextView`，不持有具体压缩算
   "workspace": "/absolute/workspace",
   "created_at": "2026-07-22T10:00:00+08:00",
   "updated_at": "2026-07-22T10:30:00+08:00",
-  "latest_summary_version": 1
+  "active_summary_version": 1,
+  "covered_through_message_id": "message-120",
+  "covered_through_turn_id": "turn-20"
 }
 ```
 
@@ -216,8 +247,8 @@ type ToolArtifact struct {
 type SummarySnapshot struct {
 	Version                int
 	SessionID              string
-	SourceMessageStartID   string
-	SourceMessageEndID     string
+	CoveredThroughMessageID string
+	CoveredThroughTurnID    string
 	PreviousSummaryVersion int
 	Content                string
 	TokenEstimate          int
@@ -226,7 +257,9 @@ type SummarySnapshot struct {
 }
 ```
 
-摘要采用版本链。新摘要成功持久化后才更新 manifest；旧摘要不覆盖。
+摘要采用版本链。覆盖游标表示该摘要已经取代的原始消息范围，是下一次 Build 的读取
+起点。新摘要成功持久化并通过校验后才更新 manifest 中的 active version 和覆盖游标；
+旧摘要不覆盖。未被 manifest 激活的摘要文件不能参与 ContextView 构建。
 
 ### 5.6 存储接口
 
@@ -234,15 +267,17 @@ type SummarySnapshot struct {
 type ConversationStore interface {
 	AppendMessage(context.Context, StoredMessage) error
 	ListMessages(context.Context, string) ([]StoredMessage, error)
+	ListMessagesAfter(context.Context, string, string) ([]StoredMessage, error)
 	SaveToolArtifact(context.Context, ToolArtifact, io.Reader) error
 	LoadToolArtifact(context.Context, string) (ToolArtifact, io.ReadCloser, error)
-	SaveSummary(context.Context, SummarySnapshot) error
-	LatestSummary(context.Context, string) (*SummarySnapshot, error)
+	ActiveSummary(context.Context, string) (*SummarySnapshot, error)
+	CommitSummary(context.Context, SummarySnapshot, int) error
 }
 ```
 
 MVP 实现 `FileConversationStore`。接口为未来数据库实现保留边界，但本期不实现其他
-Store。
+Store。`CommitSummary` 的最后一个参数是期望的 active version，用于防止并发或
+重复提交覆盖较新的检查点。
 
 ## 6. ContextView 与预算
 
@@ -463,6 +498,16 @@ SHA256：...
 完成前三层后重新估算。如果 `projected_input >= soft_compact_limit`，执行压缩。
 硬限制前必须为摘要调用本身留出空间，不能等待 API 返回超限错误。
 
+压缩还必须同时满足：
+
+- 存在 active summary 覆盖游标之后、且已经结束的完整 Turn；
+- 除最近保留 Turn 外，新增可压缩内容达到 `min_compaction_increment_tokens`；
+- 本次选择的结束消息 ID 晚于当前 `CoveredThroughMessageID`。
+
+默认 `min_compaction_increment_tokens` 为 `hard_input_limit` 的 5%，并限制在至少
+4,000 Token。达不到增量条件时不得重新摘要同一段历史；系统应继续使用当前摘要，
+必要时由 BudgetGuard 缩短工具引用或最近轮次。
+
 以下内容不参与压缩：
 
 - System Prompt；
@@ -486,6 +531,7 @@ type Summarizer interface {
 
 type SummarizeRequest struct {
 	PreviousSummary string
+	PreviousCoveredThroughMessageID string
 	Messages        []StoredMessage
 	ArtifactIndex   []ToolArtifact
 	TokenBudget     int
@@ -536,15 +582,38 @@ type SummarizeRequest struct {
 ### 10.4 摘要提交
 
 ```text
-选择可压缩的完整 Turn
+读取 active summary 及其覆盖游标
+  -> 只选择覆盖游标之后可压缩的完整 Turn
   -> 调用独立摘要模型
   -> 验证结构、大小和引用
-  -> 原子保存新 SummarySnapshot
+  -> 生成更大的 CoveredThroughMessageID / CoveredThroughTurnID
+  -> 原子提交新 SummarySnapshot 和 active checkpoint
   -> 生成新的 ContextView
   -> 重新注入持久规则
   -> 重新估算
-  -> 更新 manifest 的最新摘要版本
 ```
+
+增量摘要输入固定为：
+
+```text
+上一版摘要
++ 上一版 CoveredThroughMessageID 之后、截至本次选中结束点的完整 Turn
+```
+
+例如 V1 覆盖 Turn 1～15，后续新增 Turn 16～24。生成 V2 时只输入 V1 和 Turn
+16～24；V2 覆盖 Turn 1～24。下一次 Build 使用 V2 加 Turn 25 之后的原始消息，
+不会重新读取或摘要 Turn 1～24。
+
+`CommitSummary(snapshot, expectedActiveVersion)` 的文件提交顺序：
+
+1. 将摘要正文和元数据写入临时文件；
+2. 校验摘要结构、Token、覆盖边界单调递增及引用存在；
+3. 原子重命名为正式版本文件；
+4. 校验 manifest 的 active version 仍等于 `expectedActiveVersion`；
+5. 使用临时文件加原子重命名切换 manifest 的 active version 和覆盖游标。
+
+第 5 步成功前，旧摘要和旧游标继续生效。进程在第 3～4 步崩溃可能留下未激活的
+摘要文件，恢复时忽略；绝不能出现游标前进但对应摘要不可读的状态。
 
 如果摘要后仍超过软限制，可以再缩短摘要一次；如果仍超过硬限制，执行降级流程，
 不得进入无上限压缩循环。
@@ -584,6 +653,7 @@ budget:
   reserved_tool_result_ratio: 0.10
   tool_history_ratio: 0.25
   default_output_tokens: 8192
+  min_compaction_increment_tokens: 4000
 
 retention:
   recent_complete_turns: 3
@@ -688,6 +758,7 @@ type LayerReport struct {
 | 两个摘要模型均失败 | 生成确定性最小任务状态 |
 | 摘要结构不合法 | 拒绝提交快照并进入回退 |
 | 摘要后仍超限 | 缩短最近轮次和预览，再做硬预算检查 |
+| 没有新的可压缩 Turn | 复用 active summary，不调用摘要模型 |
 | 连续压缩无收益 | 返回 `ErrCompactionThrashing` |
 | 配置非法 | 启动失败并指出字段 |
 | Context 取消 | 中止 Build，不提交未完成摘要或归档状态 |
@@ -701,7 +772,7 @@ type LayerReport struct {
 - Loader：根规则、路径规则、路径逃逸和工具分组；
 - Offloader：单项阈值、批次阈值、原子写入和哈希失败；
 - Evictor：重复命令、重复读文件、未解决错误及当前 Turn 保护；
-- Compactor：完整 Turn 切分、最近轮次、摘要版本链和模型回退；
+- Compactor：完整 Turn 切分、最近轮次、增量覆盖游标、摘要版本链和模型回退；
 - Renderer：tool call/result 始终成对，Artifact 引用保留原 ID；
 - Store：JSONL 崩溃尾记录、并发追加、权限和格式版本。
 
@@ -710,6 +781,10 @@ type LayerReport struct {
 - 大工具结果不会直接进入下一次模型请求；
 - 连续小测试日志超过工具预算后按优先级淘汰；
 - 达到软限制时触发摘要，并重新注入根规则和路径规则；
+- 摘要覆盖 Turn 1～15 后，下一次 Build 只装配摘要和 Turn 16 之后的消息；
+- 没有超过覆盖游标的新可压缩 Turn 时，不得再次调用摘要模型；
+- V2 只消费 V1 与新增完整 Turn，覆盖游标必须单调递增；
+- 摘要文件已写入但 manifest 切换失败时，下一次 Build 继续使用 V1；
 - 独立摘要模型失败后使用当前模型；
 - 两个模型均失败时仍能生成硬预算内的最小 ContextView；
 - CLI 重启后可以读取 transcript、摘要和 Artifact；
@@ -738,6 +813,10 @@ type LayerReport struct {
 10. 摘要或归档失败不会静默丢失信息；
 11. tool call 与 tool result 在所有生成视图中保持合法配对；
 12. 日志、配置和摘要中不出现模型密钥和原始隐藏思考。
+13. Build 只读取 active summary 覆盖游标之后的原始消息，已覆盖消息不会重复进入
+    ContextView；
+14. 后续摘要只处理上一版摘要和新增完整 Turn，不会重复压缩已覆盖消息；
+15. 摘要正文、active version 和覆盖游标的切换满足失败原子性。
 
 ## 19. 分阶段实施顺序
 
@@ -773,10 +852,11 @@ type LayerReport struct {
 
 ## 20. 架构决策记录
 
-### ADR-001：采用分层 Context Manager 管线
+### ADR-001：采用四级触发式 Context Manager
 
 - **状态：** 接受；
-- **决定：** 四层策略通过独立组件由 `ContextManager` 编排；
+- **决定：** 四级策略通过独立组件由 `ContextManager` 编排，各层按自身条件触发，
+  不让每条消息依次经历四次变换；
 - **原因：** 相比把逻辑塞入 MessageManager，更容易单测和演进；相比事件溯源，MVP
   复杂度更低；
 - **代价：** 类型和接口数量增加，需要明确数据所有权。
@@ -808,3 +888,11 @@ type LayerReport struct {
 - **决定：** 第 0、1、2 层不额外调用 LLM；
 - **原因：** 行为可预测、成本低且容易测试；
 - **代价：** 对复杂语义相关性的判断弱于模型或向量检索，后续可在接口后替换。
+
+### ADR-006：使用持久化摘要检查点避免重复压缩
+
+- **状态：** 接受；
+- **决定：** active summary 保存覆盖消息和 Turn 游标，Build 只读取游标之后的原始
+  消息；新摘要通过原子 manifest 切换生效；
+- **原因：** transcript 必须保留原文，但不能让已压缩消息在每轮重新进入候选视图；
+- **代价：** Store 需要检查点一致性、版本冲突和崩溃恢复逻辑。
