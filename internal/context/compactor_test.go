@@ -84,3 +84,22 @@ func TestCompactorFallsBackOnce(t *testing.T) {
 		t.Fatalf("snapshot = %#v, primary = %d, fallback = %d", snapshot, len(primary.requests), len(fallback.requests))
 	}
 }
+
+func TestCompactorUsesBoundedDeterministicSummaryWhenModelsFail(t *testing.T) {
+	store, _ := NewFileConversationStore(t.TempDir())
+	primary := &recordingSummarizer{err: errors.New("primary failed")}
+	fallback := &recordingSummarizer{err: errors.New("fallback failed")}
+	policy := DefaultPolicy()
+	policy.RecentCompleteTurns = 0
+	policy.MinCompactionIncrementTokens = 1
+	estimator := ConservativeEstimator{}
+	compactor := ConversationCompactor{Store: store, Primary: primary, Fallback: fallback, Estimator: estimator, Policy: policy}
+	messages := []StoredMessage{{ID: "m1", SessionID: "s1", TurnID: "t1", Content: strings.Repeat("large content ", 100), TurnStatus: TurnComplete}}
+	snapshot, changed, err := compactor.Compact(context.Background(), "s1", SummarySnapshot{}, messages, 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || estimator.EstimateText("", snapshot.Content) > 80 {
+		t.Fatalf("summary tokens = %d, changed = %v", estimator.EstimateText("", snapshot.Content), changed)
+	}
+}

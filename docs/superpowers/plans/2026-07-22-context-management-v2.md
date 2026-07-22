@@ -1,6 +1,6 @@
 # 上下文管理 V2 实现计划
 
-> **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现此计划。步骤使用复选框（`- [ ]`）语法来跟踪进度。
+> **面向 AI 代理的工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现此计划。步骤使用复选框（`- [x]`）语法来跟踪进度。
 
 **目标：** 为 MyCode 实现本地持久化、按预算触发、不会重复压缩已覆盖消息的四级上下文管理。
 
@@ -44,7 +44,7 @@
 - 创建：`internal/context/file_store.go`
 - 测试：`internal/context/file_store_test.go`
 
-- [ ] **步骤 1：编写失败的检查点测试**
+- [x] **步骤 1：编写失败的检查点测试**
 
 测试创建 Turn 1～3，提交覆盖 Turn 1～2 的 V1，然后断言：
 
@@ -61,13 +61,13 @@ if err != nil || len(messages) != 1 || messages[0].ID != "m3" {
 
 同时测试 `CommitSummary(snapshot, expectedVersion)` 拒绝错误版本，且未激活摘要文件不会改变 active summary。
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：`go test ./internal/context -run 'TestFileStore|TestSummaryCheckpoint'`
 
 预期：FAIL，缺少 Store 类型或方法。
 
-- [ ] **步骤 3：实现最小文件存储**
+- [x] **步骤 3：实现最小文件存储**
 
 实现接口：
 
@@ -85,13 +85,13 @@ type ConversationStore interface {
 
 所有会话 ID 和 Artifact ID 只允许字母、数字、点、下划线和短横线；目录 `0700`、文件 `0600`。Summary 先原子写正文和元数据，再通过原子重命名 manifest 激活。
 
-- [ ] **步骤 4：运行存储测试**
+- [x] **步骤 4：运行存储测试**
 
 运行：`go test ./internal/context -run 'TestFileStore|TestSummaryCheckpoint'`
 
 预期：PASS。
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add internal/context/types.go internal/context/store.go internal/context/file_store.go internal/context/file_store_test.go
@@ -105,7 +105,7 @@ git commit -m "feat: add context session store"
 - 创建：`internal/context/estimator.go`
 - 测试：`internal/context/budget_test.go`
 
-- [ ] **步骤 1：编写失败的预算测试**
+- [x] **步骤 1：编写失败的预算测试**
 
 ```go
 func TestNewBudgetReservesOutputToolsAndMargin(t *testing.T) {
@@ -121,13 +121,13 @@ func TestNewBudgetReservesOutputToolsAndMargin(t *testing.T) {
 
 增加非法窗口、非法比例、中文和工具 JSON 估算测试。
 
-- [ ] **步骤 2：运行测试验证失败**
+- [x] **步骤 2：运行测试验证失败**
 
 运行：`go test ./internal/context -run 'TestNewBudget|TestConservativeEstimator'`
 
 预期：FAIL，缺少预算和估算器。
 
-- [ ] **步骤 3：实现预算与估算器**
+- [x] **步骤 3：实现预算与估算器**
 
 ```go
 hard := window - outputReserve - toolReserve - safetyMargin
@@ -137,13 +137,13 @@ toolHistory := int(float64(hard) * policy.ToolHistoryRatio)
 
 Fallback 估算使用 `ceil(utf8Bytes/3*1.15)`，消息额外加入固定包装开销，工具 schema 以 JSON 编码后估算。
 
-- [ ] **步骤 4：运行预算测试**
+- [x] **步骤 4：运行预算测试**
 
 运行：`go test ./internal/context -run 'TestNewBudget|TestConservativeEstimator'`
 
 预期：PASS。
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add internal/context/budget.go internal/context/estimator.go internal/context/budget_test.go
@@ -158,7 +158,7 @@ git commit -m "feat: add context token budgeting"
 - 创建：`internal/context/evictor.go`
 - 创建：`internal/context/evictor_test.go`
 
-- [ ] **步骤 1：编写失败的归档测试**
+- [x] **步骤 1：编写失败的归档测试**
 
 构造超过阈值的结果，断言完整正文可从 Artifact 恢复，而 ContextView 中只保留引用：
 
@@ -177,27 +177,27 @@ if got[0].ToolResults[0].ArtifactID == "" {
 
 增加归档失败不替换原文、当前 Turn 极大结果仍归档的测试。
 
-- [ ] **步骤 2：编写失败的淘汰测试**
+- [x] **步骤 2：编写失败的淘汰测试**
 
 连续三次执行相同测试命令，断言只保留最新完整结果；旧结果保留原 `ToolUseID` 的短引用。当前 Turn 的结果不能变为 `DROPPED`。
 
-- [ ] **步骤 3：运行测试验证失败**
+- [x] **步骤 3：运行测试验证失败**
 
 运行：`go test ./internal/context -run 'TestOffloader|TestEvictor'`
 
 预期：FAIL，缺少处理器。
 
-- [ ] **步骤 4：实现卸载和确定性淘汰**
+- [x] **步骤 4：实现卸载和确定性淘汰**
 
 卸载器计算单项和批次 Token，使用 SHA256、确定性首尾预览和 Store 写入。淘汰器按“相同工具+规范化参数”的 key 判断覆盖关系，按旧到新将 `FULL` 降级为 `REFERENCE`，直到工具历史回到预算。
 
-- [ ] **步骤 5：运行工具治理测试**
+- [x] **步骤 5：运行工具治理测试**
 
 运行：`go test ./internal/context -run 'TestOffloader|TestEvictor'`
 
 预期：PASS。
 
-- [ ] **步骤 6：提交**
+- [x] **步骤 6：提交**
 
 ```bash
 git add internal/context/offloader.go internal/context/offloader_test.go internal/context/evictor.go internal/context/evictor_test.go
@@ -212,11 +212,11 @@ git commit -m "feat: manage tool result context"
 - 修改：`internal/tool/tools_manager.go`
 - 修改：`internal/tool/tools_manager_test.go`
 
-- [ ] **步骤 1：编写失败的路径规则测试**
+- [x] **步骤 1：编写失败的路径规则测试**
 
 在临时工作区创建根 `.agent/context.md` 和 `internal/agent/.agent/context.md`，活跃路径为 `internal/agent/agent.go`，断言两份规则按根到叶顺序加载且不能越出工作区。
 
-- [ ] **步骤 2：编写失败的工具子集测试**
+- [x] **步骤 2：编写失败的工具子集测试**
 
 ```go
 schemas := manager.BuildSchemas([]string{"ReadFile", "Grep"})
@@ -227,23 +227,23 @@ if len(schemas) != 2 {
 
 验证未知名称返回错误，不能静默丢失请求能力。
 
-- [ ] **步骤 3：运行测试验证失败**
+- [x] **步骤 3：运行测试验证失败**
 
 运行：`go test ./internal/context ./internal/tool -run 'TestDemandLoader|TestBuildSchemas'`
 
 预期：FAIL，缺少 Loader 和 schema 子集方法。
 
-- [ ] **步骤 4：实现确定性加载器**
+- [x] **步骤 4：实现确定性加载器**
 
 实现根规则、活跃路径规则和工具分组。无法判断意图时返回全部工具 schema；选择 schema 只影响模型可见工具，不绕过 `ToolsManager.Execute` 权限检查。
 
-- [ ] **步骤 5：运行加载测试**
+- [x] **步骤 5：运行加载测试**
 
 运行：`go test ./internal/context ./internal/tool -run 'TestDemandLoader|TestBuildSchemas'`
 
 预期：PASS。
 
-- [ ] **步骤 6：提交**
+- [x] **步骤 6：提交**
 
 ```bash
 git add internal/context/loader.go internal/context/loader_test.go internal/tool/tools_manager.go internal/tool/tools_manager_test.go
@@ -256,21 +256,21 @@ git commit -m "feat: load context and tools on demand"
 - 创建：`internal/context/compactor.go`
 - 创建：`internal/context/compactor_test.go`
 
-- [ ] **步骤 1：编写失败的增量压缩测试**
+- [x] **步骤 1：编写失败的增量压缩测试**
 
 Fake Summarizer 记录请求。V1 覆盖 `m15`，Store 包含 `m1`～`m24`，断言请求只包含 `m16`～本次结束点，不包含 `m1`～`m15`；提交后 V2 游标单调前进。
 
-- [ ] **步骤 2：编写无新增量和回退测试**
+- [x] **步骤 2：编写无新增量和回退测试**
 
 没有覆盖游标后的可压缩 Turn 时，Fake Summarizer 调用次数必须为 0。主摘要器失败时调用 fallback 一次；两者失败时生成固定结构的最小任务状态。
 
-- [ ] **步骤 3：运行测试验证失败**
+- [x] **步骤 3：运行测试验证失败**
 
 运行：`go test ./internal/context -run 'TestCompactor'`
 
 预期：FAIL，缺少 Compactor。
 
-- [ ] **步骤 4：实现增量 Compactor**
+- [x] **步骤 4：实现增量 Compactor**
 
 ```go
 type Summarizer interface {
@@ -280,13 +280,13 @@ type Summarizer interface {
 
 Compactor 只接收 active summary 加游标之后的消息，保留最近完整 Turn，检查最小增量，验证摘要非空且不超预算，再调用 `CommitSummary`。同一次压缩最多主模型和 fallback 各一次。
 
-- [ ] **步骤 5：运行摘要测试**
+- [x] **步骤 5：运行摘要测试**
 
 运行：`go test ./internal/context -run 'TestCompactor'`
 
 预期：PASS。
 
-- [ ] **步骤 6：提交**
+- [x] **步骤 6：提交**
 
 ```bash
 git add internal/context/compactor.go internal/context/compactor_test.go
@@ -303,35 +303,35 @@ git commit -m "feat: add incremental context compaction"
 - 修改：`internal/repl/ui.go`
 - 修改：`.gitignore`
 
-- [ ] **步骤 1：编写失败的 ContextManager 测试**
+- [x] **步骤 1：编写失败的 ContextManager 测试**
 
 断言 Build 的输入为 active summary 加游标之后的消息；低于所有阈值时不调用 Offloader、Evictor 或 Summarizer；超过各自阈值时只触发对应组件；最终超过硬限制返回 `ErrContextBudgetExceeded`。
 
-- [ ] **步骤 2：编写失败的 Agent 集成测试**
+- [x] **步骤 2：编写失败的 Agent 集成测试**
 
 Fake LLM 捕获两次 Stream 请求。第一次压缩并激活 V1 后，第二次请求不得包含已覆盖消息正文，只包含 V1 和游标之后的消息；tool call/result ID 始终配对。
 
-- [ ] **步骤 3：运行测试验证失败**
+- [x] **步骤 3：运行测试验证失败**
 
 运行：`go test ./internal/context ./internal/agent -run 'TestContextManager|TestAgentUsesContextView'`
 
 预期：FAIL，ContextManager 尚未接入。
 
-- [ ] **步骤 4：实现触发式编排和 Agent 注入**
+- [x] **步骤 4：实现触发式编排和 Agent 注入**
 
 `NewAgent` 增加可选 `ContextManager` 依赖；未配置时保留现有行为以兼容测试。配置后每次 Stream 前调用 Build，工具结果先追加 Store，再由下一次 Build 处理。
 
-- [ ] **步骤 5：初始化 CLI 会话**
+- [x] **步骤 5：初始化 CLI 会话**
 
 REPL 启动时生成 SessionID，创建 `.context/sessions` Store、默认 Policy 和可选 Summary Model；凭据从环境变量加载，不在新增配置或日志中写明文密钥。将 `.context/` 加入 `.gitignore`。
 
-- [ ] **步骤 6：运行集成测试**
+- [x] **步骤 6：运行集成测试**
 
 运行：`go test ./internal/context ./internal/agent ./internal/repl`
 
 预期：PASS。
 
-- [ ] **步骤 7：运行完整测试和静态检查**
+- [x] **步骤 7：运行完整测试和静态检查**
 
 运行：`gofmt -w internal/context internal/tool/tools_manager.go internal/tool/tools_manager_test.go internal/agent/agent.go internal/agent/agent_test.go internal/repl/ui.go`
 
@@ -341,7 +341,7 @@ REPL 启动时生成 SessionID，创建 `.context/sessions` Store、默认 Polic
 
 预期：全部通过。
 
-- [ ] **步骤 8：提交**
+- [x] **步骤 8：提交**
 
 ```bash
 git add .gitignore internal/context internal/tool/tools_manager.go internal/tool/tools_manager_test.go internal/agent/agent.go internal/agent/agent_test.go internal/repl/ui.go

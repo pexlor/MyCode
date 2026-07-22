@@ -62,6 +62,7 @@ func (c ConversationCompactor) Compact(
 	content, err := c.callSummarizers(ctx, request)
 	if err != nil {
 		content = deterministicSummary(active.Content, eligible)
+		content = fitTextToTokenBudget(c.Estimator, c.Model, content, tokenBudget)
 	}
 	if strings.TrimSpace(content) == "" {
 		return active, false, errors.New("compactor produced an empty summary")
@@ -83,6 +84,28 @@ func (c ConversationCompactor) Compact(
 		return active, false, err
 	}
 	return snapshot, true, nil
+}
+
+func fitTextToTokenBudget(estimator TokenEstimator, model, content string, budget int) string {
+	if budget <= 0 || estimator.EstimateText(model, content) <= budget {
+		return content
+	}
+	runes := []rune(content)
+	low, high := 0, len(runes)
+	for low < high {
+		middle := (low + high + 1) / 2
+		candidate := string(runes[:middle]) + "\n[deterministic summary truncated]"
+		if estimator.EstimateText(model, candidate) <= budget {
+			low = middle
+		} else {
+			high = middle - 1
+		}
+	}
+	result := string(runes[:low]) + "\n[deterministic summary truncated]"
+	if estimator.EstimateText(model, result) <= budget {
+		return result
+	}
+	return "summary truncated"
 }
 
 func (c ConversationCompactor) callSummarizers(ctx context.Context, request SummarizeRequest) (string, error) {

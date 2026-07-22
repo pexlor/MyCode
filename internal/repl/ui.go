@@ -2,6 +2,7 @@ package repl
 
 import (
 	"MyCode/internal/agent"
+	contextmanager "MyCode/internal/context"
 	"MyCode/internal/llm"
 	"MyCode/internal/message"
 	"MyCode/internal/prompt"
@@ -10,7 +11,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -83,11 +87,13 @@ func runInteractive() {
 }
 
 func initAgent() (*agent.Agent, func(), error) {
-	// 后续支持可修改
-	apiKey := "sk-72683ab6f2174c81bc7d05d13b4c7296"
+	apiKey := os.Getenv("MYCODE_API_KEY")
+	if apiKey == "" {
+		return nil, nil, fmt.Errorf("MYCODE_API_KEY is required")
+	}
 	protocol := "openai-compat"
-	baseURL := defaultBaseURL
-	modelName := defaultModelName
+	baseURL := envOrDefault("MYCODE_BASE_URL", defaultBaseURL)
+	modelName := envOrDefault("MYCODE_MODEL", defaultModelName)
 
 	// 构造llm客户端
 	client, err := llm.NewClient(&llm.ModelParm{
@@ -113,7 +119,72 @@ func initAgent() (*agent.Agent, func(), error) {
 		cleanup()
 		return nil, nil, err
 	}
+	workspace, err := os.Getwd()
+	if err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	store, err := contextmanager.NewFileConversationStore(filepath.Join(workspace, ".context", "sessions"))
+	if err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	var primary contextmanager.Summarizer
+	summaryModel := os.Getenv("MYCODE_SUMMARY_MODEL")
+	if summaryModel != "" {
+		summaryAPIKey := os.Getenv("MYCODE_SUMMARY_API_KEY")
+		if summaryAPIKey == "" {
+			cleanup()
+			return nil, nil, fmt.Errorf("MYCODE_SUMMARY_API_KEY is required when MYCODE_SUMMARY_MODEL is set")
+		}
+		summaryClient, summaryErr := llm.NewClient(&llm.ModelParm{
+			Protocol:  protocol,
+			BaseURL:   envOrDefault("MYCODE_SUMMARY_BASE_URL", baseURL),
+			APIKey:    summaryAPIKey,
+			ModelName: summaryModel,
+		})
+		if summaryErr != nil {
+			cleanup()
+			return nil, nil, summaryErr
+		}
+		primary = contextmanager.LLMSummarizer{Client: summaryClient}
+	}
+	contextManager, err := contextmanager.NewContextManager(contextmanager.ContextManagerConfig{
+		Store: store, Estimator: contextmanager.ConservativeEstimator{}, Policy: contextmanager.DefaultPolicy(),
+		Model: contextmanager.ModelContextSpec{
+			ModelName: modelName, ContextWindow: envInt("MYCODE_CONTEXT_WINDOW", 128000),
+			MaxOutputTokens: envInt("MYCODE_MAX_OUTPUT_TOKENS", 8192),
+		},
+		Workspace: workspace,
+		Primary:   primary,
+		Fallback:  contextmanager.LLMSummarizer{Client: client},
+	})
+	if err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	sessionID := fmt.Sprintf("session-%d", time.Now().UnixNano())
+	runner.SetContextManager(contextManager, sessionID)
 	return runner, cleanup, nil
+}
+
+func envOrDefault(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envInt(name string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
 }
 
 func initMessageManager() (*message.MessageManager, error) {

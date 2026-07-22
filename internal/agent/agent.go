@@ -1,6 +1,7 @@
 package agent
 
 import (
+	contextmanager "MyCode/internal/context"
 	"MyCode/internal/llm"
 	"MyCode/internal/message"
 	"MyCode/internal/tool"
@@ -13,10 +14,12 @@ import (
 const DefaultMaxIterations = 800
 
 type Agent struct {
-	ctx           context.Context
-	client        llm.LLMClient
-	toolManager   *tool.ToolsManager
-	MaxIterations int
+	ctx            context.Context
+	client         llm.LLMClient
+	toolManager    *tool.ToolsManager
+	contextManager *contextmanager.ContextManager
+	sessionID      string
+	MaxIterations  int
 }
 
 func NewAgent(ctx context.Context, client llm.LLMClient, toolManager *tool.ToolsManager) (*Agent, error) {
@@ -37,6 +40,11 @@ func NewAgent(ctx context.Context, client llm.LLMClient, toolManager *tool.Tools
 	}, nil
 }
 
+func (a *Agent) SetContextManager(manager *contextmanager.ContextManager, sessionID string) {
+	a.contextManager = manager
+	a.sessionID = sessionID
+}
+
 // Run executes the agent loop and emits events for upper-layer UI.
 func (a *Agent) Run(mm *message.MessageManager) <-chan AgentEvent {
 	agentEventCh := make(chan AgentEvent, 32)
@@ -53,10 +61,26 @@ func (a *Agent) Run(mm *message.MessageManager) <-chan AgentEvent {
 
 		for iteration := 0; iteration < a.MaxIterations; iteration++ {
 			toolSchemas := a.toolManager.BuildAllSchemas()
+			systemPrompt := mm.SystemPrompt
+			history := mm.History
+			if a.contextManager != nil {
+				view, err := a.contextManager.Build(a.ctx, contextmanager.BuildInput{
+					SessionID: a.sessionID, SystemPrompt: mm.SystemPrompt,
+					CurrentRequest: latestUserRequest(mm.History), History: mm.History,
+					AvailableTools: toolSchemas,
+				})
+				if err != nil {
+					sendAgentEvent(a.ctx, agentEventCh, ErrorEvent{Err: err})
+					return
+				}
+				systemPrompt = view.SystemPrompt
+				history = view.Messages
+				toolSchemas = view.Tools
+			}
 			events, errs := a.client.Stream(&llm.StreamRequest{
 				Context:      a.ctx,
-				SystemPrompt: mm.SystemPrompt,
-				Messages:     mm.History,
+				SystemPrompt: systemPrompt,
+				Messages:     history,
 				Tools:        toolSchemas,
 			})
 
@@ -92,6 +116,15 @@ func (a *Agent) Run(mm *message.MessageManager) <-chan AgentEvent {
 	}()
 
 	return agentEventCh
+}
+
+func latestUserRequest(history []message.Message) string {
+	for index := len(history) - 1; index >= 0; index-- {
+		if history[index].Role == message.USER {
+			return history[index].Content
+		}
+	}
+	return ""
 }
 
 func (a *Agent) run(mm *message.MessageManager) <-chan AgentEvent {
