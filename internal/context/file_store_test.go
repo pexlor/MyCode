@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFileStoreSummaryCheckpointSkipsCoveredMessages(t *testing.T) {
@@ -106,5 +109,81 @@ func TestFileStoreRejectsUnsafeIdentifiers(t *testing.T) {
 	err = store.AppendMessage(context.Background(), StoredMessage{ID: "m1", SessionID: "../escape"})
 	if !errors.Is(err, ErrInvalidIdentifier) {
 		t.Fatalf("error = %v, want ErrInvalidIdentifier", err)
+	}
+}
+
+func TestFileStoreSessionLifecycle(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewFileConversationStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	created := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+	metadata := SessionMetadata{ID: "session-one", Title: "first", Workspace: "/repo", CreatedAt: created}
+	if err := store.CreateSession(ctx, metadata); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendMessage(ctx, StoredMessage{ID: "m1", SessionID: metadata.ID, Role: "user", Content: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetSession(ctx, metadata.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != "first" || got.Workspace != "/repo" || got.MessageCount != 1 || got.FormatVersion != storeFormatVersion {
+		t.Fatalf("metadata = %#v", got)
+	}
+	if err := store.RenameSession(ctx, metadata.ID, "renamed"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = store.GetSession(ctx, metadata.ID)
+	if got.Title != "renamed" {
+		t.Fatalf("title = %q", got.Title)
+	}
+	if err := store.DeleteSession(ctx, metadata.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, metadata.ID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("session directory still exists: %v", err)
+	}
+}
+
+func TestFileStoreListSessionsFiltersWorkspaceAndSorts(t *testing.T) {
+	store, err := NewFileConversationStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, metadata := range []SessionMetadata{
+		{ID: "old", Title: "old", Workspace: "/repo", UpdatedAt: time.Unix(1, 0)},
+		{ID: "other", Title: "other", Workspace: "/else", UpdatedAt: time.Unix(3, 0)},
+		{ID: "new", Title: "new", Workspace: "/repo", UpdatedAt: time.Unix(2, 0)},
+	} {
+		if err := store.CreateSession(ctx, metadata); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, err := store.ListSessions(ctx, "/repo", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].ID != "new" || items[1].ID != "old" {
+		t.Fatalf("sessions = %#v", items)
+	}
+}
+
+func TestFileStoreDeleteSessionRejectsSymlink(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	store, err := NewFileConversationStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteSession(context.Background(), "linked"); !errors.Is(err, ErrUnsafeSessionPath) {
+		t.Fatalf("error = %v, want ErrUnsafeSessionPath", err)
 	}
 }

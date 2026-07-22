@@ -12,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -71,7 +73,147 @@ func (s *FileConversationStore) AppendMessage(ctx context.Context, message Store
 	if _, err := file.Write(data); err != nil {
 		return fmt.Errorf("append transcript: %w", err)
 	}
-	return file.Sync()
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	manifestPath := filepath.Join(dir, "manifest.json")
+	manifest, err := loadManifest(manifestPath, message.SessionID)
+	if err != nil {
+		return err
+	}
+	manifest.MessageCount++
+	manifest.UpdatedAt = time.Now()
+	return writeJSONAtomic(manifestPath, manifest)
+}
+
+func (s *FileConversationStore) CreateSession(ctx context.Context, metadata SessionMetadata) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !validIdentifier(metadata.ID) {
+		return ErrInvalidIdentifier
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	dir := filepath.Join(s.root, metadata.ID)
+	if _, err := os.Lstat(dir); err == nil {
+		return ErrSessionExists
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		return fmt.Errorf("create session: %w", err)
+	}
+	now := time.Now()
+	if metadata.CreatedAt.IsZero() {
+		metadata.CreatedAt = now
+	}
+	if metadata.UpdatedAt.IsZero() {
+		metadata.UpdatedAt = metadata.CreatedAt
+	}
+	manifest := manifestFromMetadata(metadata)
+	if err := writeJSONAtomic(filepath.Join(dir, "manifest.json"), manifest); err != nil {
+		_ = os.Remove(dir)
+		return err
+	}
+	return nil
+}
+
+func (s *FileConversationStore) GetSession(ctx context.Context, sessionID string) (SessionMetadata, error) {
+	if err := ctx.Err(); err != nil {
+		return SessionMetadata{}, err
+	}
+	if !validIdentifier(sessionID) {
+		return SessionMetadata{}, ErrInvalidIdentifier
+	}
+	manifest, err := loadManifest(filepath.Join(s.root, sessionID, "manifest.json"), sessionID)
+	if errors.Is(err, os.ErrNotExist) {
+		return SessionMetadata{}, ErrSessionNotFound
+	}
+	if err != nil {
+		return SessionMetadata{}, err
+	}
+	return metadataFromManifest(manifest), nil
+}
+
+func (s *FileConversationStore) ListSessions(ctx context.Context, workspace string, limit int) ([]SessionMetadata, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(s.root)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]SessionMetadata, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !validIdentifier(entry.Name()) {
+			continue
+		}
+		item, err := s.GetSession(ctx, entry.Name())
+		if err != nil {
+			return nil, fmt.Errorf("load session %s: %w", entry.Name(), err)
+		}
+		if item.Workspace == workspace {
+			items = append(items, item)
+		}
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].UpdatedAt.After(items[j].UpdatedAt) })
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	return items, nil
+}
+
+func (s *FileConversationStore) RenameSession(ctx context.Context, sessionID, title string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !validIdentifier(sessionID) {
+		return ErrInvalidIdentifier
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := filepath.Join(s.root, sessionID, "manifest.json")
+	manifest, err := loadManifest(path, sessionID)
+	if errors.Is(err, os.ErrNotExist) {
+		return ErrSessionNotFound
+	}
+	if err != nil {
+		return err
+	}
+	manifest.Title = title
+	manifest.UpdatedAt = time.Now()
+	return writeJSONAtomic(path, manifest)
+}
+
+func (s *FileConversationStore) DeleteSession(ctx context.Context, sessionID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !validIdentifier(sessionID) {
+		return ErrInvalidIdentifier
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	target := filepath.Join(s.root, sessionID)
+	relative, err := filepath.Rel(s.root, target)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return ErrUnsafeSessionPath
+	}
+	info, err := os.Lstat(target)
+	if errors.Is(err, os.ErrNotExist) {
+		return ErrSessionNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return ErrUnsafeSessionPath
+	}
+	if _, err := loadManifest(filepath.Join(target, "manifest.json"), sessionID); err != nil {
+		return fmt.Errorf("validate session before delete: %w", err)
+	}
+	return os.RemoveAll(target)
 }
 
 // ListMessages 按写入顺序读取一个 Session 的全部原始消息。
@@ -320,6 +462,14 @@ func loadManifest(path, sessionID string) (sessionManifest, error) {
 		return sessionManifest{}, errors.New("unsupported or mismatched context manifest")
 	}
 	return manifest, nil
+}
+
+func manifestFromMetadata(metadata SessionMetadata) sessionManifest {
+	return sessionManifest{FormatVersion: storeFormatVersion, SessionID: metadata.ID, Title: metadata.Title, Workspace: metadata.Workspace, CreatedAt: metadata.CreatedAt, UpdatedAt: metadata.UpdatedAt, MessageCount: metadata.MessageCount}
+}
+
+func metadataFromManifest(manifest sessionManifest) SessionMetadata {
+	return SessionMetadata{ID: manifest.SessionID, Title: manifest.Title, Workspace: manifest.Workspace, CreatedAt: manifest.CreatedAt, UpdatedAt: manifest.UpdatedAt, MessageCount: manifest.MessageCount, FormatVersion: manifest.FormatVersion}
 }
 
 func readJSON(path string, target any) error {

@@ -13,6 +13,9 @@ var (
 	ErrSummaryVersionConflict = errors.New("summary version conflict")
 	// ErrArtifactHashMismatch 表示归档正文与元数据中的 SHA256 不一致。
 	ErrArtifactHashMismatch = errors.New("tool artifact hash mismatch")
+	ErrSessionNotFound      = errors.New("session not found")
+	ErrSessionExists        = errors.New("session already exists")
+	ErrUnsafeSessionPath    = errors.New("unsafe session path")
 )
 
 // ConversationStore 定义上下文管理所需的最小持久化能力。
@@ -25,4 +28,13 @@ type ConversationStore interface {
 	LoadToolArtifact(context.Context, string, string) (ToolArtifact, io.ReadCloser, error)
 	ActiveSummary(context.Context, string) (*SummarySnapshot, error)
 	CommitSummary(context.Context, SummarySnapshot, int) error
+}
+
+type SessionStore interface {
+	ConversationStore
+	CreateSession(context.Context, SessionMetadata) error
+	GetSession(context.Context, string) (SessionMetadata, error)
+	ListSessions(context.Context, string, int) ([]SessionMetadata, error)
+	RenameSession(context.Context, string, string) error
+	DeleteSession(context.Context, string) error
 }

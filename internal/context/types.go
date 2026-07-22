@@ -2,6 +2,17 @@ package contextmanager
 
 import "time"
 
+// SessionMetadata 是会话列表和生命周期命令使用的轻量元数据。
+type SessionMetadata struct {
+	ID            string    `json:"session_id"`
+	Title         string    `json:"title"`
+	Workspace     string    `json:"workspace"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	MessageCount  int       `json:"message_count"`
+	FormatVersion int       `json:"format_version"`
+}
+
 type TurnStatus string
 
 const (
@@ -95,6 +106,9 @@ type sessionManifest struct {
 	SessionID               string    `json:"session_id"`
 	CreatedAt               time.Time `json:"created_at"`
 	UpdatedAt               time.Time `json:"updated_at"`
+	Title                   string    `json:"title,omitempty"`
+	Workspace               string    `json:"workspace,omitempty"`
+	MessageCount            int       `json:"message_count"`
 	ActiveSummaryVersion    int       `json:"active_summary_version"`
 	CoveredThroughMessageID string    `json:"covered_through_message_id,omitempty"`
 	CoveredThroughTurnID    string    `json:"covered_through_turn_id,omitempty"`
