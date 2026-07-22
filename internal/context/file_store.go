@@ -21,10 +21,14 @@ const storeFormatVersion = 1
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 type FileConversationStore struct {
+	// root 指向 .context/sessions；每个 Session 都拥有独立子目录。
 	root string
-	mu   sync.Mutex
+	// mu 保护同一进程内的追加写和 manifest 切换，避免文件内容互相覆盖。
+	mu sync.Mutex
 }
 
+// NewFileConversationStore 创建基于本地文件的 ConversationStore。
+// 目录权限固定为 0700，防止同一机器上的其他用户直接读取会话内容。
 func NewFileConversationStore(root string) (*FileConversationStore, error) {
 	if root == "" {
 		return nil, errors.New("context store root is required")
@@ -35,6 +39,8 @@ func NewFileConversationStore(root string) (*FileConversationStore, error) {
 	return &FileConversationStore{root: root}, nil
 }
 
+// AppendMessage 将原始消息追加到 transcript.jsonl。
+// transcript 是审计事实来源；后续的卸载、淘汰和压缩都不会回写或删除这里的内容。
 func (s *FileConversationStore) AppendMessage(ctx context.Context, message StoredMessage) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -60,6 +66,7 @@ func (s *FileConversationStore) AppendMessage(ctx context.Context, message Store
 	if err != nil {
 		return fmt.Errorf("encode message: %w", err)
 	}
+	// 每条消息独占一行，既便于顺序追加，也便于未来按事件流进行恢复。
 	data = append(data, '\n')
 	if _, err := file.Write(data); err != nil {
 		return fmt.Errorf("append transcript: %w", err)
@@ -67,6 +74,7 @@ func (s *FileConversationStore) AppendMessage(ctx context.Context, message Store
 	return file.Sync()
 }
 
+// ListMessages 按写入顺序读取一个 Session 的全部原始消息。
 func (s *FileConversationStore) ListMessages(ctx context.Context, sessionID string) ([]StoredMessage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -99,6 +107,8 @@ func (s *FileConversationStore) ListMessages(ctx context.Context, sessionID stri
 	return messages, nil
 }
 
+// ListMessagesAfter 只返回压缩检查点之后的消息。
+// 如果检查点不存在则返回错误，防止错误游标导致旧消息被静默跳过。
 func (s *FileConversationStore) ListMessagesAfter(ctx context.Context, sessionID, messageID string) ([]StoredMessage, error) {
 	messages, err := s.ListMessages(ctx, sessionID)
 	if err != nil || messageID == "" {
@@ -112,6 +122,8 @@ func (s *FileConversationStore) ListMessagesAfter(ctx context.Context, sessionID
 	return nil, fmt.Errorf("checkpoint message %q not found", messageID)
 }
 
+// SaveToolArtifact 将完整工具输出和元数据分别保存为 .txt 与 .json。
+// 正文先写临时文件、计算 SHA256，再原子重命名；只有归档成功后上层才能用引用替换正文。
 func (s *FileConversationStore) SaveToolArtifact(ctx context.Context, artifact ToolArtifact, content io.Reader) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -140,6 +152,7 @@ func (s *FileConversationStore) SaveToolArtifact(ctx context.Context, artifact T
 		temporary.Close()
 		return err
 	}
+	// io.MultiWriter 保证写盘内容和参与哈希计算的字节完全一致。
 	hash := sha256.New()
 	written, copyErr := io.Copy(io.MultiWriter(temporary, hash), content)
 	closeErr := temporary.Close()
@@ -161,6 +174,8 @@ func (s *FileConversationStore) SaveToolArtifact(ctx context.Context, artifact T
 	return writeJSONAtomic(filepath.Join(artifactDir, artifact.ID+".json"), artifact)
 }
 
+// LoadToolArtifact 读取完整工具结果，并在返回前验证 SHA256。
+// 校验失败时不返回正文，避免模型使用已经损坏或遭到替换的内容。
 func (s *FileConversationStore) LoadToolArtifact(ctx context.Context, sessionID, artifactID string) (ToolArtifact, io.ReadCloser, error) {
 	if err := ctx.Err(); err != nil {
 		return ToolArtifact{}, nil, err
@@ -193,6 +208,8 @@ func (s *FileConversationStore) LoadToolArtifact(ctx context.Context, sessionID,
 	return artifact, file, nil
 }
 
+// ActiveSummary 只读取 manifest 指向的摘要。
+// summaries 目录中即使存在更高版本文件，只要没有被 manifest 激活就一律忽略。
 func (s *FileConversationStore) ActiveSummary(ctx context.Context, sessionID string) (*SummarySnapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -217,6 +234,8 @@ func (s *FileConversationStore) ActiveSummary(ctx context.Context, sessionID str
 	return &summary, nil
 }
 
+// CommitSummary 以乐观锁方式提交摘要和覆盖游标。
+// expectedVersion 必须等于当前 active version，防止较旧的压缩任务覆盖较新的检查点。
 func (s *FileConversationStore) CommitSummary(ctx context.Context, summary SummarySnapshot, expectedVersion int) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -249,12 +268,15 @@ func (s *FileConversationStore) CommitSummary(ctx context.Context, summary Summa
 		return err
 	}
 	base := filepath.Join(summaryDir, fmt.Sprintf("summary-%04d", summary.Version))
+	// 先持久化摘要正文和元数据。此阶段崩溃最多留下未激活的孤立文件，
+	// 下次 Build 仍会继续使用旧 manifest，因此不会丢失上下文。
 	if err := writeFileAtomic(base+".md", []byte(summary.Content)); err != nil {
 		return err
 	}
 	if err := writeJSONAtomic(base+".json", summary); err != nil {
 		return err
 	}
+	// 最后切换 manifest。只有这一步成功后，新摘要及其覆盖游标才同时生效。
 	manifest.ActiveSummaryVersion = summary.Version
 	manifest.CoveredThroughMessageID = summary.CoveredThroughMessageID
 	manifest.CoveredThroughTurnID = summary.CoveredThroughTurnID
@@ -262,6 +284,7 @@ func (s *FileConversationStore) CommitSummary(ctx context.Context, summary Summa
 	return writeJSONAtomic(filepath.Join(dir, "manifest.json"), manifest)
 }
 
+// ensureSession 创建 Session 目录和初始 manifest。
 func (s *FileConversationStore) ensureSession(sessionID string) (string, error) {
 	if !validIdentifier(sessionID) {
 		return "", ErrInvalidIdentifier
@@ -283,6 +306,7 @@ func (s *FileConversationStore) ensureSession(sessionID string) (string, error) 
 	return dir, nil
 }
 
+// validIdentifier 限制可进入本地路径的标识符字符集，阻止 ../ 等路径穿越形式。
 func validIdentifier(value string) bool {
 	return value != "" && identifierPattern.MatchString(value)
 }
@@ -317,6 +341,8 @@ func writeJSONAtomic(path string, value any) error {
 	return writeFileAtomic(path, append(data, '\n'))
 }
 
+// writeFileAtomic 通过“同目录临时文件 + fsync + rename”提交单个文件。
+// 临时文件与目标文件位于同一文件系统，rename 才能提供可靠的原子替换语义。
 func writeFileAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {

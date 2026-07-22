@@ -68,8 +68,8 @@ func (m *ToolsManager) BuildAllSchemas() []*ToolSchema {
 	return schemas
 }
 
-// BuildSchemas returns schemas in the requested order. It does not alter the
-// registered tools or bypass execution-time permission checks.
+// BuildSchemas 按请求顺序返回工具 schema。
+// 该方法只控制模型可见工具，不改变注册表，也不会绕过执行阶段的权限检查。
 func (m *ToolsManager) BuildSchemas(names []string) ([]*ToolSchema, error) {
 	schemas := make([]*ToolSchema, 0, len(names))
 	for _, name := range names {

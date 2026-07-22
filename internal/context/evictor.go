@@ -8,6 +8,8 @@ type StaleResultEvictor struct {
 	Limit     int
 }
 
+// Evict 在工具历史超过独立预算时，按时间从旧到新降级结果。
+// 当前 Turn 永远不被本层淘汰；即使正文被移除，也保留 ToolUseID 以维持协议配对。
 func (e StaleResultEvictor) Evict(messages []StoredMessage, currentTurnID string) []StoredMessage {
 	result := cloneStoredMessages(messages)
 	if e.Estimator == nil || e.Limit <= 0 {
@@ -17,6 +19,7 @@ func (e StaleResultEvictor) Evict(messages []StoredMessage, currentTurnID string
 	if total <= e.Limit {
 		return result
 	}
+	// StoredMessage 保持 transcript 顺序，因此正向遍历天然优先处理最旧结果。
 	for messageIndex := range result {
 		if result[messageIndex].TurnID == currentTurnID {
 			continue
@@ -29,6 +32,7 @@ func (e StaleResultEvictor) Evict(messages []StoredMessage, currentTurnID string
 			oldTokens := e.Estimator.EstimateText(e.Model, item.Content)
 			item.State = ResultReference
 			if item.ArtifactID != "" {
+				// 已有 Artifact 时留下可恢复引用；否则明确提示只能从 transcript 恢复。
 				item.Content = fmt.Sprintf("[stale tool result evicted]\nartifact_id: %s\nRead the artifact for exact content.", item.ArtifactID)
 			} else {
 				item.Content = "[stale tool result evicted; original remains in session transcript]"

@@ -41,6 +41,8 @@ func NewAgent(ctx context.Context, client llm.LLMClient, toolManager *tool.Tools
 }
 
 func (a *Agent) SetContextManager(manager *contextmanager.ContextManager, sessionID string) {
+	// ContextManager 与 SessionID 成对设置：前者决定如何构建视图，后者决定从哪个
+	// transcript 和摘要检查点恢复上下文。
 	a.contextManager = manager
 	a.sessionID = sessionID
 }
@@ -64,6 +66,8 @@ func (a *Agent) Run(mm *message.MessageManager) <-chan AgentEvent {
 			systemPrompt := mm.SystemPrompt
 			history := mm.History
 			if a.contextManager != nil {
+				// 每次模型请求（包括同一 Turn 中的工具循环）都重新构建 ContextView。
+				// Build 内部通过同步游标避免重复写 transcript，并通过摘要检查点避免重复压缩。
 				view, err := a.contextManager.Build(a.ctx, contextmanager.BuildInput{
 					SessionID: a.sessionID, SystemPrompt: mm.SystemPrompt,
 					CurrentRequest: latestUserRequest(mm.History), History: mm.History,
@@ -73,6 +77,7 @@ func (a *Agent) Run(mm *message.MessageManager) <-chan AgentEvent {
 					sendAgentEvent(a.ctx, agentEventCh, ErrorEvent{Err: err})
 					return
 				}
+				// 从这里开始，LLM 只接触经过预算治理的视图，不再直接接触完整 History。
 				systemPrompt = view.SystemPrompt
 				history = view.Messages
 				toolSchemas = view.Tools
@@ -119,6 +124,7 @@ func (a *Agent) Run(mm *message.MessageManager) <-chan AgentEvent {
 }
 
 func latestUserRequest(history []message.Message) string {
+	// 工具循环会在用户消息后追加多条 assistant/tool 消息，因此必须逆序寻找最近用户请求。
 	for index := len(history) - 1; index >= 0; index-- {
 		if history[index].Role == message.USER {
 			return history[index].Content

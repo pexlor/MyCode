@@ -14,6 +14,8 @@ type LLMSummarizer struct {
 	Client llm.LLMClient
 }
 
+// Summarize 通过独立 LLMClient 生成结构化工作记忆。
+// 请求显式传入空 Tools，并拒绝任何工具调用事件，确保摘要过程不会产生副作用。
 func (s LLMSummarizer) Summarize(ctx context.Context, request SummarizeRequest) (SummarizeResponse, error) {
 	if s.Client == nil {
 		return SummarizeResponse{}, errors.New("summary client is required")
@@ -34,6 +36,7 @@ func (s LLMSummarizer) Summarize(ctx context.Context, request SummarizeRequest) 
 		Tools:    nil,
 	})
 	var builder strings.Builder
+	// 同时消费事件和错误通道，直到两者关闭，避免流式客户端因无人读取而阻塞。
 	for events != nil || errs != nil {
 		select {
 		case <-ctx.Done():

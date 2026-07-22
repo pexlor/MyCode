@@ -11,6 +11,7 @@ import (
 )
 
 type ResultOffloader struct {
+	// Store 保存完整结果；ContextView 中只保留可恢复引用。
 	Store       ConversationStore
 	Estimator   TokenEstimator
 	Model       string
@@ -24,6 +25,8 @@ type resultLocation struct {
 	tokens       int
 }
 
+// Process 检查候选消息中的工具结果，并按单项阈值和批次阈值决定是否归档。
+// 返回的是深拷贝后的上下文视图，不会修改 ConversationStore 中的原始消息。
 func (o ResultOffloader) Process(ctx context.Context, sessionID string, messages []StoredMessage) ([]StoredMessage, error) {
 	result := cloneStoredMessages(messages)
 	if o.Store == nil || o.Estimator == nil {
@@ -42,6 +45,7 @@ func (o ResultOffloader) Process(ctx context.Context, sessionID string, messages
 			locations = append(locations, resultLocation{messageIndex: messageIndex, resultIndex: resultIndex, tokens: tokens})
 		}
 	}
+	// 批次超限时优先卸载最大的结果，通常可以用最少的归档次数释放最多 Token。
 	sort.SliceStable(locations, func(i, j int) bool { return locations[i].tokens > locations[j].tokens })
 	for _, location := range locations {
 		mustArchive := o.SingleLimit > 0 && location.tokens > o.SingleLimit
@@ -60,6 +64,7 @@ func (o ResultOffloader) Process(ctx context.Context, sessionID string, messages
 			TokenEstimate: location.tokens,
 			Preview:       previewText(toolResult.Content, 12),
 		}
+		// 必须先成功保存完整正文，之后才能把 ContextView 中的 Content 替换为引用。
 		if err := o.Store.SaveToolArtifact(ctx, artifact, strings.NewReader(toolResult.Content)); err != nil {
 			return nil, err
 		}
@@ -71,6 +76,7 @@ func (o ResultOffloader) Process(ctx context.Context, sessionID string, messages
 	return result, nil
 }
 
+// artifactID 由工具调用 ID 和正文共同生成，确保相同结果具有稳定、可重复定位的 ID。
 func artifactID(toolUseID, content string) string {
 	digest := sha256.Sum256([]byte(toolUseID + "\x00" + content))
 	return "artifact-" + hex.EncodeToString(digest[:8])
@@ -85,6 +91,7 @@ func renderArtifactReference(artifact ToolArtifact, content string) string {
 		artifact.ToolName, status, artifact.ID, artifact.TokenEstimate, previewText(content, 12))
 }
 
+// previewText 同时限制行数和字符数，避免单行超长日志绕过预览截断。
 func previewText(content string, maxLines int) string {
 	const maxCharacters = 240
 	if len(content) > maxCharacters {
@@ -99,6 +106,7 @@ func previewText(content string, maxLines int) string {
 	return strings.Join(lines[:half], "\n") + "\n... truncated ...\n" + strings.Join(lines[len(lines)-half:], "\n")
 }
 
+// cloneStoredMessages 深拷贝会被上下文策略修改的 slice，保证原始候选数据不被污染。
 func cloneStoredMessages(messages []StoredMessage) []StoredMessage {
 	result := append([]StoredMessage(nil), messages...)
 	for index := range result {

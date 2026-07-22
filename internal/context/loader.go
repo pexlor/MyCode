@@ -17,10 +17,13 @@ type LoadedRule struct {
 	ContentHash string
 }
 
+// DemandLoader 负责第 0 层按需加载，不调用 LLM，也不修改持久化会话。
 type DemandLoader struct {
 	Workspace string
 }
 
+// LoadRules 加载根规则以及活跃文件路径沿途的局部规则。
+// 返回顺序固定为父目录到子目录，使更具体的规则出现在更靠后的位置。
 func (l DemandLoader) LoadRules(activePaths []string) ([]LoadedRule, error) {
 	if l.Workspace == "" {
 		return nil, nil
@@ -58,8 +61,7 @@ func (l DemandLoader) LoadRules(activePaths []string) ([]LoadedRule, error) {
 			directory = parent
 		}
 	}
-	// Candidates discovered from leaves are reordered by path depth so parent
-	// rules always precede child rules.
+	// 候选规则是从叶子路径向上发现的，这里按目录深度重排，保证父规则先于子规则。
 	sortPathsByDepth(candidates)
 	var rules []LoadedRule
 	for _, candidate := range candidates {
@@ -76,9 +78,12 @@ func (l DemandLoader) LoadRules(activePaths []string) ([]LoadedRule, error) {
 	return rules, nil
 }
 
+// SelectTools 使用确定性关键词选择本轮要暴露给模型的工具 schema。
+// 这里只减少模型可见定义，不改变工具注册状态，更不会绕过 ToolsManager 的权限检查。
 func (DemandLoader) SelectTools(request string, activeToolNames []string, all []*tool.ToolSchema) []*tool.ToolSchema {
 	lower := strings.ToLower(request)
 	if strings.TrimSpace(lower) == "" {
+		// 无法判断意图时回退到全部工具，优先保证能力可达。
 		return append([]*tool.ToolSchema(nil), all...)
 	}
 	selected := make(map[string]bool)

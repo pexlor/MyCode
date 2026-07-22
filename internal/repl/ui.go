@@ -87,6 +87,7 @@ func runInteractive() {
 }
 
 func initAgent() (*agent.Agent, func(), error) {
+	// 模型凭据只从环境变量读取，禁止写入源码、配置文件或 Session 归档。
 	apiKey := os.Getenv("MYCODE_API_KEY")
 	if apiKey == "" {
 		return nil, nil, fmt.Errorf("MYCODE_API_KEY is required")
@@ -129,6 +130,8 @@ func initAgent() (*agent.Agent, func(), error) {
 		cleanup()
 		return nil, nil, err
 	}
+	// 独立摘要模型是可选配置。配置后优先使用它，以便单独控制摘要成本和速度；
+	// 未配置或调用失败时，ContextManager 会回退当前对话模型一次。
 	var primary contextmanager.Summarizer
 	summaryModel := os.Getenv("MYCODE_SUMMARY_MODEL")
 	if summaryModel != "" {
@@ -163,12 +166,14 @@ func initAgent() (*agent.Agent, func(), error) {
 		cleanup()
 		return nil, nil, err
 	}
+	// 每次启动创建独立 Session 目录。文件会在 CLI 退出后保留，便于审计和恢复。
 	sessionID := fmt.Sprintf("session-%d", time.Now().UnixNano())
 	runner.SetContextManager(contextManager, sessionID)
 	return runner, cleanup, nil
 }
 
 func envOrDefault(name, fallback string) string {
+	// 空白环境变量视为未配置，避免把空字符串传给 LLM Client。
 	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 		return value
 	}
@@ -176,6 +181,7 @@ func envOrDefault(name, fallback string) string {
 }
 
 func envInt(name string, fallback int) int {
+	// 非法或非正数配置使用安全默认值，保证预算计算始终拿到正整数。
 	value := strings.TrimSpace(os.Getenv(name))
 	if value == "" {
 		return fallback

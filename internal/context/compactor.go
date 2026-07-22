@@ -8,7 +8,9 @@ import (
 )
 
 type SummarizeRequest struct {
-	PreviousSummary                 string
+	// PreviousSummary 是上一版已经生效的任务状态，而不是全部原始历史。
+	PreviousSummary string
+	// PreviousCoveredThroughMessageID 明确增量起点，便于测试和审计重复压缩问题。
 	PreviousCoveredThroughMessageID string
 	Messages                        []StoredMessage
 	ArtifactIndex                   []ToolArtifact
@@ -23,6 +25,8 @@ type Summarizer interface {
 	Summarize(context.Context, SummarizeRequest) (SummarizeResponse, error)
 }
 
+// ConversationCompactor 负责第 3 层增量压缩。
+// 它只接收 active checkpoint 之后的消息，并通过 CommitSummary 原子推进覆盖游标。
 type ConversationCompactor struct {
 	Store     ConversationStore
 	Primary   Summarizer
@@ -32,6 +36,8 @@ type ConversationCompactor struct {
 	Policy    ContextPolicy
 }
 
+// Compact 尝试把较早的完整 Turn 合并进新摘要。
+// changed=false 表示没有足够的新内容，本次不会调用摘要模型，也不会推进检查点。
 func (c ConversationCompactor) Compact(
 	ctx context.Context,
 	sessionID string,
@@ -39,6 +45,7 @@ func (c ConversationCompactor) Compact(
 	messages []StoredMessage,
 	tokenBudget int,
 ) (SummarySnapshot, bool, error) {
+	// 保留最近若干完整 Turn，避免刚发生的细节过早变成有损摘要。
 	eligible := compactableMessages(messages, c.Policy.RecentCompleteTurns)
 	if len(eligible) == 0 {
 		return active, false, nil
@@ -59,6 +66,7 @@ func (c ConversationCompactor) Compact(
 		Messages:                        eligible,
 		TokenBudget:                     tokenBudget,
 	}
+	// 独立摘要模型失败时只回退当前模型一次；两者都失败则使用确定性最小摘要。
 	content, err := c.callSummarizers(ctx, request)
 	if err != nil {
 		content = deterministicSummary(active.Content, eligible)
@@ -80,12 +88,14 @@ func (c ConversationCompactor) Compact(
 		Content:                 content,
 		TokenEstimate:           c.Estimator.EstimateText(c.Model, content),
 	}
+	// CommitSummary 成功前旧摘要始终有效，所以上层不会看到“游标已推进但摘要丢失”。
 	if err := c.Store.CommitSummary(ctx, snapshot, active.Version); err != nil {
 		return active, false, err
 	}
 	return snapshot, true, nil
 }
 
+// fitTextToTokenBudget 用 Rune 边界截断确定性摘要，避免切坏 UTF-8 中文字符。
 func fitTextToTokenBudget(estimator TokenEstimator, model, content string, budget int) string {
 	if budget <= 0 || estimator.EstimateText(model, content) <= budget {
 		return content
@@ -127,6 +137,7 @@ func (c ConversationCompactor) callSummarizers(ctx context.Context, request Summ
 	return "", errors.New("all summarizers failed")
 }
 
+// compactableMessages 以 Turn 为单位选择可压缩范围，绝不拆开工具调用与结果。
 func compactableMessages(messages []StoredMessage, recentTurns int) []StoredMessage {
 	var completedTurns []string
 	seen := make(map[string]bool)
@@ -165,6 +176,8 @@ func estimateStoredMessages(estimator TokenEstimator, model string, messages []S
 	return total
 }
 
+// deterministicSummary 是摘要模型全部不可用时的降级路径。
+// 它只复述已有消息和工具结论，不产生新的推断或决策。
 func deterministicSummary(previous string, messages []StoredMessage) string {
 	var builder strings.Builder
 	builder.WriteString("## Previous task state\n")
