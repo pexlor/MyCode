@@ -40,6 +40,13 @@ func TestAgentUsesContextManagerView(t *testing.T) {
 	if !requestContains(client.requests[1], "first response") || !requestContains(client.requests[1], "second request") {
 		t.Fatalf("second request history = %#v", client.requests[1].Messages)
 	}
+	stored, err := store.ListMessages(context.Background(), "session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 4 || stored[3].Content != "second response" {
+		t.Fatalf("stored messages = %#v", stored)
+	}
 }
 
 type contextCaptureClient struct {

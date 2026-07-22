@@ -102,6 +102,12 @@ func (a *Agent) Run(mm *message.MessageManager) <-chan AgentEvent {
 						Content: assistantText,
 					})
 				}
+				if a.contextManager != nil {
+					if err := a.contextManager.SyncHistory(a.ctx, a.sessionID, mm.History); err != nil {
+						sendAgentEvent(a.ctx, agentEventCh, ErrorEvent{Err: err})
+						return
+					}
+				}
 				sendAgentEvent(a.ctx, agentEventCh, DoneEvent{StopReason: stopReason, Usage: addUsage(totalUsage, usage)})
 				return
 			}

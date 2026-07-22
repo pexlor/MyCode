@@ -231,7 +231,9 @@ func notifySessionChange(commandContext *CommandContext, sessionID string) {
 	}
 }
 
-func shortID(id string) string { return truncateRunes(id, 8) }
+func shortID(id string) string {
+	return truncateRunes(strings.TrimPrefix(id, "session-"), 8)
+}
 func truncateRunes(value string, limit int) string {
 	runes := []rune(value)
 	if len(runes) > limit {

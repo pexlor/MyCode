@@ -60,3 +60,31 @@ func TestContextManagerBuildRejectsHardLimit(t *testing.T) {
 		t.Fatalf("error = %v, want budget error", err)
 	}
 }
+
+func TestContextManagerResumedHistoryDoesNotDuplicateTranscript(t *testing.T) {
+	store, _ := NewFileConversationStore(t.TempDir())
+	ctx := context.Background()
+	for _, item := range []StoredMessage{
+		{ID: "message-000001", SessionID: "s1", TurnID: "turn-000001", Role: message.USER, Content: "old question"},
+		{ID: "message-000002", SessionID: "s1", TurnID: "turn-000001", Role: message.ASSISTANT, Content: "old answer", TurnStatus: TurnComplete},
+	} {
+		if err := store.AppendMessage(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manager, err := NewContextManager(ContextManagerConfig{Store: store, Estimator: ConservativeEstimator{}, Policy: DefaultPolicy(), Model: ModelContextSpec{ModelName: "test", ContextWindow: 100000, MaxOutputTokens: 1000}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	history := []message.Message{{Role: message.USER, Content: "old question"}, {Role: message.ASSISTANT, Content: "old answer"}, {Role: message.USER, Content: "new question"}}
+	if _, err := manager.Build(ctx, BuildInput{SessionID: "s1", SystemPrompt: "system", History: history}); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := store.ListMessages(ctx, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 3 || stored[2].Content != "new question" {
+		t.Fatalf("stored = %#v", stored)
+	}
+}

@@ -101,6 +101,12 @@ func TestNewRenameCurrentAndExitCommands(t *testing.T) {
 	}
 }
 
+func TestShortIDOmitsFixedSessionPrefix(t *testing.T) {
+	if got := shortID("session-abcdef123456"); got != "abcdef12" {
+		t.Fatalf("short id = %q", got)
+	}
+}
+
 func registerHelp(t *testing.T, registry *CommandRegistry) {
 	t.Helper()
 	if err := registry.Register(helpCommand()); err != nil {

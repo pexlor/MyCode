@@ -4,17 +4,18 @@ import (
 	"MyCode/internal/agent"
 	contextmanager "MyCode/internal/context"
 	"MyCode/internal/llm"
-	"MyCode/internal/message"
 	"MyCode/internal/prompt"
+	"MyCode/internal/session"
 	"MyCode/internal/tool"
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 )
 
 const (
@@ -41,23 +42,44 @@ func runInteractive() {
 
 	printWelcome()
 
-	runner, cleanup, err := initAgent()
-	if err != nil {
-		printError("agent 初始化失败", err)
-		return
-	}
-	defer cleanup()
-
-	messageManager, err := initMessageManager()
+	systemPrompt, err := prompt.BuildSystemPrompt()
 	if err != nil {
 		printError("消息初始化失败", err)
 		return
 	}
+	runtime, err := initAgent()
+	if err != nil {
+		printError("agent 初始化失败", err)
+		return
+	}
+	defer runtime.cleanup()
+
+	sessions, err := session.NewService(runtime.store, runtime.workspace, systemPrompt)
+	if err != nil {
+		printError("会话初始化失败", err)
+		return
+	}
+	registry, err := NewDefaultCommandRegistry()
+	if err != nil {
+		printError("命令初始化失败", err)
+		return
+	}
+	runtime.runner.SetContextManager(runtime.contextManager, sessions.Current().ID)
+	commandContext := &CommandContext{Sessions: sessions, In: reader, Out: os.Stdout, Registry: registry, Clear: func(out io.Writer) {
+		fmt.Fprint(out, "\033[H\033[2J")
+		printWelcomeTo(out)
+	}, OnSessionChange: func(sessionID string) {
+		runtime.runner.SetContextManager(runtime.contextManager, sessionID)
+	}}
 
 	for {
 		fmt.Print(promptLabel())
 		userInput, err := reader.ReadString('\n')
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				fmt.Println(dim("bye."))
+				return
+			}
 			printError("读取输入失败", err)
 			return
 		}
@@ -67,30 +89,50 @@ func runInteractive() {
 			continue
 		}
 
-		if handled, quit := handleCommand(userInput); handled {
-			if quit {
+		result := registry.Execute(context.Background(), commandContext, userInput)
+		if result.Handled {
+			if result.Err != nil {
+				printError("命令失败", result.Err)
+			}
+			if result.Quit {
 				fmt.Println(dim("bye."))
 				return
 			}
 			continue
 		}
 
-		messageManager.AddText(userInput)
+		if err := sessions.AddUserMessage(context.Background(), userInput); err != nil {
+			printError("保存消息失败", err)
+			continue
+		}
 		fmt.Print(assistantLabel())
-		for event := range runner.Run(messageManager) {
+		failed := false
+		for event := range runtime.runner.Run(sessions.Current().Messages) {
 			if err := handleAgentEvent(event); err != nil {
 				printError("执行失败", err)
-				return
+				failed = true
+				break
 			}
+		}
+		if failed {
+			continue
 		}
 	}
 }
 
-func initAgent() (*agent.Agent, func(), error) {
+type agentRuntime struct {
+	runner         *agent.Agent
+	contextManager *contextmanager.ContextManager
+	store          *contextmanager.FileConversationStore
+	workspace      string
+	cleanup        func()
+}
+
+func initAgent() (*agentRuntime, error) {
 	// 模型凭据只从环境变量读取，禁止写入源码、配置文件或 Session 归档。
 	apiKey := os.Getenv("MYCODE_API_KEY")
 	if apiKey == "" {
-		return nil, nil, fmt.Errorf("MYCODE_API_KEY is required")
+		return nil, fmt.Errorf("MYCODE_API_KEY is required")
 	}
 	protocol := "openai-compat"
 	baseURL := envOrDefault("MYCODE_BASE_URL", defaultBaseURL)
@@ -105,30 +147,30 @@ func initAgent() (*agent.Agent, func(), error) {
 	})
 
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	ctx := context.Background()
 
 	tools, cleanup, err := tool.CreateDefaultToolsWithMCP(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	runner, err := agent.NewAgent(ctx, client, tools)
 	if err != nil {
 		cleanup()
-		return nil, nil, err
+		return nil, err
 	}
 	workspace, err := os.Getwd()
 	if err != nil {
 		cleanup()
-		return nil, nil, err
+		return nil, err
 	}
 	store, err := contextmanager.NewFileConversationStore(filepath.Join(workspace, ".context", "sessions"))
 	if err != nil {
 		cleanup()
-		return nil, nil, err
+		return nil, err
 	}
 	// 独立摘要模型是可选配置。配置后优先使用它，以便单独控制摘要成本和速度；
 	// 未配置或调用失败时，ContextManager 会回退当前对话模型一次。
@@ -138,7 +180,7 @@ func initAgent() (*agent.Agent, func(), error) {
 		summaryAPIKey := os.Getenv("MYCODE_SUMMARY_API_KEY")
 		if summaryAPIKey == "" {
 			cleanup()
-			return nil, nil, fmt.Errorf("MYCODE_SUMMARY_API_KEY is required when MYCODE_SUMMARY_MODEL is set")
+			return nil, fmt.Errorf("MYCODE_SUMMARY_API_KEY is required when MYCODE_SUMMARY_MODEL is set")
 		}
 		summaryClient, summaryErr := llm.NewClient(&llm.ModelParm{
 			Protocol:  protocol,
@@ -148,7 +190,7 @@ func initAgent() (*agent.Agent, func(), error) {
 		})
 		if summaryErr != nil {
 			cleanup()
-			return nil, nil, summaryErr
+			return nil, summaryErr
 		}
 		primary = contextmanager.LLMSummarizer{Client: summaryClient}
 	}
@@ -164,12 +206,9 @@ func initAgent() (*agent.Agent, func(), error) {
 	})
 	if err != nil {
 		cleanup()
-		return nil, nil, err
+		return nil, err
 	}
-	// 每次启动创建独立 Session 目录。文件会在 CLI 退出后保留，便于审计和恢复。
-	sessionID := fmt.Sprintf("session-%d", time.Now().UnixNano())
-	runner.SetContextManager(contextManager, sessionID)
-	return runner, cleanup, nil
+	return &agentRuntime{runner: runner, contextManager: contextManager, store: store, workspace: workspace, cleanup: cleanup}, nil
 }
 
 func envOrDefault(name, fallback string) string {
@@ -191,16 +230,6 @@ func envInt(name string, fallback int) int {
 		return fallback
 	}
 	return parsed
-}
-
-func initMessageManager() (*message.MessageManager, error) {
-	SystemPrompt, err := prompt.BuildSystemPrompt()
-	if err != nil {
-		return nil, err
-	}
-	return &message.MessageManager{
-		SystemPrompt: SystemPrompt,
-	}, nil
 }
 
 func handleAgentEvent(event agent.AgentEvent) error {
@@ -243,8 +272,12 @@ func handleAgentEvent(event agent.AgentEvent) error {
 }
 
 func printWelcome() {
-	fmt.Println(colorCyan + "MyCode CLI" + colorReset)
-	fmt.Printf("%smodel: %s | /help for commands | /exit to quit%s\n\n", colorDim, defaultModelName, colorReset)
+	printWelcomeTo(os.Stdout)
+}
+
+func printWelcomeTo(out io.Writer) {
+	fmt.Fprintln(out, colorCyan+"MyCode CLI"+colorReset)
+	fmt.Fprintf(out, "%smodel: %s | /help for commands | /exit to quit%s\n\n", colorDim, defaultModelName, colorReset)
 }
 
 func promptLabel() string {
@@ -253,31 +286,6 @@ func promptLabel() string {
 
 func assistantLabel() string {
 	return colorCyan + "assistant" + colorReset + colorDim + " > " + colorReset
-}
-
-func handleCommand(input string) (handled bool, quit bool) {
-	switch strings.ToLower(input) {
-	case "/exit", "/quit", "exit", "quit":
-		return true, true
-	case "/help":
-		printHelp()
-		return true, false
-	case "/clear", "clear":
-		fmt.Print("\033[H\033[2J")
-		printWelcome()
-		return true, false
-	default:
-		return false, false
-	}
-}
-
-func printHelp() {
-	fmt.Println()
-	fmt.Println(colorCyan + "Commands" + colorReset)
-	fmt.Println("  /help   show this help")
-	fmt.Println("  /clear  clear the screen")
-	fmt.Println("  /exit   quit MyCode")
-	fmt.Println()
 }
 
 func printError(label string, err error) {

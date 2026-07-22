@@ -200,7 +200,33 @@ func (m *ContextManager) messagesForView(ctx context.Context, sessionID string, 
 func (m *ContextManager) syncHistory(ctx context.Context, sessionID string, history []message.Message) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	start := m.syncedCount[sessionID]
+	start, initialized := m.syncedCount[sessionID]
+	if !initialized {
+		existing, err := m.store.ListMessages(ctx, sessionID)
+		if err != nil {
+			return err
+		}
+		if len(existing) > len(history) {
+			return errors.New("stored message history is longer than resumed history")
+		}
+		for index := range existing {
+			if existing[index].Role != history[index].Role || existing[index].Content != history[index].Content {
+				return fmt.Errorf("resumed history differs from transcript at message %d", index+1)
+			}
+		}
+		start = len(existing)
+		m.syncedCount[sessionID] = start
+		turn := 0
+		for _, item := range existing {
+			if item.Role == message.USER {
+				turn++
+			}
+		}
+		if turn == 0 && len(existing) > 0 {
+			turn = 1
+		}
+		m.turnCount[sessionID] = turn
+	}
 	if start > len(history) {
 		return errors.New("message history shrank during session")
 	}
@@ -222,6 +248,14 @@ func (m *ContextManager) syncHistory(ctx context.Context, sessionID string, hist
 	}
 	m.turnCount[sessionID] = turn
 	return nil
+}
+
+// SyncHistory 在一次 Agent Run 结束后立即持久化最终 assistant 回复。
+func (m *ContextManager) SyncHistory(ctx context.Context, sessionID string, history []message.Message) error {
+	if !validIdentifier(sessionID) {
+		return ErrInvalidIdentifier
+	}
+	return m.syncHistory(ctx, sessionID, history)
 }
 
 // fromMessage 为旧消息生成稳定的 MessageID 和 TurnID，并识别最终 assistant 回复。
