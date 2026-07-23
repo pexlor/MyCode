@@ -30,6 +30,9 @@ func Load(warnings io.Writer) (Config, error) {
 func LoadFile(path string, warnings io.Writer) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return Config{}, fmt.Errorf("read config %s: %w; create it with at least:\nmodel:\n  protocol: anthropic\n  base_url: https://api.anthropic.com\n  api_key: <your-api-key>\n  name: <model-name>", path, err)
+		}
 		return Config{}, fmt.Errorf("read config %s: %w", path, err)
 	}
 
@@ -37,7 +40,6 @@ func LoadFile(path string, warnings io.Writer) (Config, error) {
 	if err := yaml.Unmarshal(data, &result); err != nil {
 		return Config{}, fmt.Errorf("decode config %s: %w", path, err)
 	}
-	result.applyDefaults()
 	if err := applyEnvironment(&result); err != nil {
 		return Config{}, fmt.Errorf("load config %s: %w", path, err)
 	}

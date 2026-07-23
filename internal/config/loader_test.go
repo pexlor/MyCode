@@ -45,7 +45,7 @@ func TestLoadFileAppliesDefaultsAndSummaryBaseURL(t *testing.T) {
 func TestLoadFileErrorsIncludePath(t *testing.T) {
 	clearConfigEnvironment(t)
 	path := filepath.Join(t.TempDir(), "missing.yaml")
-	if _, err := LoadFile(path, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), path) {
+	if _, err := LoadFile(path, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "model:") {
 		t.Fatalf("missing file error = %v", err)
 	}
 	if err := os.WriteFile(path, []byte("model: ["), 0o600); err != nil {
@@ -124,6 +124,20 @@ func TestInvalidEnvironmentIntegerIsAnError(t *testing.T) {
 	_, err := LoadFile(writeValidConfig(t, 0o600, ""), &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "MYCODE_CONTEXT_WINDOW") || !strings.Contains(err.Error(), "large") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestSummaryBaseURLFollowsOverriddenModelBaseURL(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("ANTHROPIC_BASE_URL", "https://overridden.example.com")
+	path := writeValidConfig(t, 0o600, "summary:\n  model: summary-a\n  api_key: summary-secret\n")
+
+	got, err := LoadFile(path, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Summary.BaseURL != "https://overridden.example.com" {
+		t.Fatalf("summary base URL = %q", got.Summary.BaseURL)
 	}
 }
 
