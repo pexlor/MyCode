@@ -84,6 +84,49 @@ func TestLoadFileWarnsForBroadPermissions(t *testing.T) {
 	}
 }
 
+func TestEnvironmentOverridesFile(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("MYCODE_PROTOCOL", "openai-compat")
+	t.Setenv("MYCODE_BASE_URL", "https://mycode.example.com")
+	t.Setenv("ANTHROPIC_BASE_URL", "https://protocol.example.com")
+	t.Setenv("MYCODE_API_KEY", "mycode-key")
+	t.Setenv("ANTHROPIC_API_KEY", "protocol-key")
+	t.Setenv("MYCODE_MODEL", "model-b")
+	t.Setenv("MYCODE_MAX_TOKENS", "2048")
+	t.Setenv("MYCODE_SUMMARY_MODEL", "summary-b")
+	t.Setenv("MYCODE_SUMMARY_BASE_URL", "https://summary.example.com")
+	t.Setenv("MYCODE_SUMMARY_API_KEY", "summary-key")
+	t.Setenv("MYCODE_CONTEXT_WINDOW", "64000")
+	t.Setenv("MYCODE_MAX_OUTPUT_TOKENS", "4096")
+
+	got, err := LoadFile(writeValidConfig(t, 0o600, ""), &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Model.BaseURL != "https://protocol.example.com" || got.Model.APIKey != "protocol-key" {
+		t.Fatalf("protocol-specific precedence failed: %#v", got.Model)
+	}
+	if got.Model.Protocol != "openai-compat" || got.Model.Name != "model-b" || got.Model.MaxTokens != 2048 {
+		t.Fatalf("model overrides = %#v", got.Model)
+	}
+	if got.Summary.Model != "summary-b" || got.Summary.BaseURL != "https://summary.example.com" || got.Summary.APIKey != "summary-key" {
+		t.Fatalf("summary overrides = %#v", got.Summary)
+	}
+	if got.Context.Window != 64000 || got.Context.OutputReserve != 4096 {
+		t.Fatalf("context overrides = %#v", got.Context)
+	}
+}
+
+func TestInvalidEnvironmentIntegerIsAnError(t *testing.T) {
+	clearConfigEnvironment(t)
+	t.Setenv("MYCODE_CONTEXT_WINDOW", "large")
+
+	_, err := LoadFile(writeValidConfig(t, 0o600, ""), &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "MYCODE_CONTEXT_WINDOW") || !strings.Contains(err.Error(), "large") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func writeValidConfig(t *testing.T, mode os.FileMode, suffix string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")
