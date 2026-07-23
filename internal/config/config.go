@@ -22,6 +22,9 @@ type ModelConfig struct {
 	APIKey    string `yaml:"api_key"`
 	Name      string `yaml:"name"`
 	MaxTokens int    `yaml:"max_tokens"`
+	// EnableThinking is passed to providers that support a non-standard
+	// enable_thinking request field (for example, Qwen OpenAI-compatible APIs).
+	EnableThinking bool `yaml:"enable_thinking"`
 }
 
 type SummaryConfig struct {

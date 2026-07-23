@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/openai/openai-go/v3"
@@ -17,6 +18,7 @@ const openaiStreamIdleTimeout = 5 * time.Minute
 type OpenAiCompatClient struct {
 	client    openai.Client
 	modelParm *ModelParm
+	mu        sync.RWMutex
 }
 
 func newOpenAiCompatClient(parm *ModelParm) (*OpenAiCompatClient, error) {
@@ -34,6 +36,18 @@ func newOpenAiCompatClient(parm *ModelParm) (*OpenAiCompatClient, error) {
 		client:    client,
 		modelParm: parm,
 	}, nil
+}
+
+func (c *OpenAiCompatClient) SetThinkingEnabled(enabled bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.modelParm.EnableThinking = enabled
+}
+
+func (c *OpenAiCompatClient) ThinkingEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.modelParm.EnableThinking
 }
 
 func (c *OpenAiCompatClient) Stream(req *StreamRequest) (<-chan StreamEvent, <-chan error) {
@@ -75,7 +89,13 @@ func (c *OpenAiCompatClient) Stream(req *StreamRequest) (<-chan StreamEvent, <-c
 		}
 
 		// 发起请求
-		stream := c.client.Chat.Completions.NewStreaming(ctx, reqParams)
+		requestOptions := []option.RequestOption{}
+		if c.ThinkingEnabled() {
+			// enable_thinking is a Qwen/OpenAI-compatible extension. The SDK
+			// preserves it as a top-level JSON property through WithJSONSet.
+			requestOptions = append(requestOptions, option.WithJSONSet("enable_thinking", true))
+		}
+		stream := c.client.Chat.Completions.NewStreaming(ctx, reqParams, requestOptions...)
 		defer stream.Close()
 
 		// sse 无响应超时时间
@@ -137,6 +157,9 @@ func (c *OpenAiCompatClient) Stream(req *StreamRequest) (<-chan StreamEvent, <-c
 				choice := chunk.Choices[0]
 				delta := choice.Delta
 				// text content delta
+				if thinking := openAICompatThinkingDelta(chunk.RawJSON()); thinking != "" {
+					eventsChan <- ThinkingStream{Text: thinking}
+				}
 				if delta.Content != "" {
 					eventsChan <- TextStream{Text: delta.Content}
 				}
@@ -192,6 +215,25 @@ func (c *OpenAiCompatClient) Stream(req *StreamRequest) (<-chan StreamEvent, <-c
 	}()
 
 	return eventsChan, errsChan
+}
+
+// openAICompatThinkingDelta reads provider extensions which are intentionally
+// absent from the OpenAI SDK's typed ChatCompletionChunk definition.
+func openAICompatThinkingDelta(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	var chunk struct {
+		Choices []struct {
+			Delta struct {
+				ReasoningContent string `json:"reasoning_content"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(raw), &chunk); err != nil || len(chunk.Choices) == 0 {
+		return ""
+	}
+	return chunk.Choices[0].Delta.ReasoningContent
 }
 
 func buildChatCompletionMessages(req *StreamRequest) []openai.ChatCompletionMessageParamUnion {

@@ -12,7 +12,7 @@ import (
 func TestLoadFile(t *testing.T) {
 	clearConfigEnvironment(t)
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	data := []byte("model:\n  protocol: anthropic\n  base_url: https://api.example.com\n  api_key: secret\n  name: model-a\n  max_tokens: 4096\ncontext:\n  window: 200000\n  output_reserve: 8192\n")
+	data := []byte("model:\n  protocol: anthropic\n  base_url: https://api.example.com\n  api_key: secret\n  name: model-a\n  max_tokens: 4096\n  enable_thinking: true\ncontext:\n  window: 200000\n  output_reserve: 8192\n")
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -21,7 +21,7 @@ func TestLoadFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Model.Name != "model-a" || got.Model.MaxTokens != 4096 || got.Context.Window != 200000 {
+	if got.Model.Name != "model-a" || got.Model.MaxTokens != 4096 || !got.Model.EnableThinking || got.Context.Window != 200000 {
 		t.Fatalf("config = %#v", got)
 	}
 }
@@ -93,6 +93,7 @@ func TestEnvironmentOverridesFile(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "protocol-key")
 	t.Setenv("MYCODE_MODEL", "model-b")
 	t.Setenv("MYCODE_MAX_TOKENS", "2048")
+	t.Setenv("MYCODE_ENABLE_THINKING", "true")
 	t.Setenv("MYCODE_SUMMARY_MODEL", "summary-b")
 	t.Setenv("MYCODE_SUMMARY_BASE_URL", "https://summary.example.com")
 	t.Setenv("MYCODE_SUMMARY_API_KEY", "summary-key")
@@ -106,7 +107,7 @@ func TestEnvironmentOverridesFile(t *testing.T) {
 	if got.Model.BaseURL != "https://protocol.example.com" || got.Model.APIKey != "protocol-key" {
 		t.Fatalf("protocol-specific precedence failed: %#v", got.Model)
 	}
-	if got.Model.Protocol != "openai-compat" || got.Model.Name != "model-b" || got.Model.MaxTokens != 2048 {
+	if got.Model.Protocol != "openai-compat" || got.Model.Name != "model-b" || got.Model.MaxTokens != 2048 || !got.Model.EnableThinking {
 		t.Fatalf("model overrides = %#v", got.Model)
 	}
 	if got.Summary.Model != "summary-b" || got.Summary.BaseURL != "https://summary.example.com" || got.Summary.APIKey != "summary-key" {
@@ -156,7 +157,7 @@ func clearConfigEnvironment(t *testing.T) {
 	for _, name := range []string{
 		"MYCODE_PROTOCOL", "MYCODE_BASE_URL", "ANTHROPIC_BASE_URL",
 		"MYCODE_API_KEY", "ANTHROPIC_API_KEY", "MYCODE_MODEL",
-		"MYCODE_MAX_TOKENS", "MYCODE_SUMMARY_MODEL", "MYCODE_SUMMARY_BASE_URL",
+		"MYCODE_MAX_TOKENS", "MYCODE_ENABLE_THINKING", "MYCODE_SUMMARY_MODEL", "MYCODE_SUMMARY_BASE_URL",
 		"MYCODE_SUMMARY_API_KEY", "MYCODE_CONTEXT_WINDOW", "MYCODE_MAX_OUTPUT_TOKENS",
 	} {
 		t.Setenv(name, "")

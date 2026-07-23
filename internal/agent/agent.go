@@ -47,10 +47,36 @@ func (a *Agent) SetContextManager(manager *contextmanager.ContextManager, sessio
 	a.sessionID = sessionID
 }
 
+// SetThinkingEnabled updates the mode used by subsequent model requests.
+func (a *Agent) SetThinkingEnabled(enabled bool) error {
+	controller, ok := a.client.(llm.ThinkingModeController)
+	if !ok {
+		return errors.New("the configured model protocol does not support toggling thinking mode")
+	}
+	controller.SetThinkingEnabled(enabled)
+	return nil
+}
+
+func (a *Agent) ThinkingEnabled() (bool, error) {
+	controller, ok := a.client.(llm.ThinkingModeController)
+	if !ok {
+		return false, errors.New("the configured model protocol does not support toggling thinking mode")
+	}
+	return controller.ThinkingEnabled(), nil
+}
+
 // Run executes the agent loop and emits events for upper-layer UI.
 func (a *Agent) Run(mm *message.MessageManager) <-chan AgentEvent {
+	return a.RunContext(agentContext(a), mm)
+}
+
+// RunContext executes one agent turn with a caller-controlled context. This
+// lets an interactive UI interrupt an in-flight model request or tool call.
+func (a *Agent) RunContext(ctx context.Context, mm *message.MessageManager) <-chan AgentEvent {
 	agentEventCh := make(chan AgentEvent, 32)
-	ctx := agentContext(a)
+	if ctx == nil {
+		ctx = agentContext(a)
+	}
 
 	go func() {
 		defer close(agentEventCh)
@@ -68,13 +94,13 @@ func (a *Agent) Run(mm *message.MessageManager) <-chan AgentEvent {
 			if a.contextManager != nil {
 				// 每次模型请求（包括同一 Turn 中的工具循环）都重新构建 ContextView。
 				// Build 内部通过同步游标避免重复写 transcript，并通过摘要检查点避免重复压缩。
-				view, err := a.contextManager.Build(a.ctx, contextmanager.BuildInput{
+				view, err := a.contextManager.Build(ctx, contextmanager.BuildInput{
 					SessionID: a.sessionID, SystemPrompt: mm.SystemPrompt,
 					CurrentRequest: latestUserRequest(mm.History), History: mm.History,
 					AvailableTools: toolSchemas,
 				})
 				if err != nil {
-					sendAgentEvent(a.ctx, agentEventCh, ErrorEvent{Err: err})
+					sendAgentEvent(ctx, agentEventCh, ErrorEvent{Err: err})
 					return
 				}
 				// 从这里开始，LLM 只接触经过预算治理的视图，不再直接接触完整 History。
@@ -82,16 +108,17 @@ func (a *Agent) Run(mm *message.MessageManager) <-chan AgentEvent {
 				history = view.Messages
 				toolSchemas = view.Tools
 			}
+			sendAgentEvent(ctx, agentEventCh, ThinkingStartEvent{})
 			events, errs := a.client.Stream(&llm.StreamRequest{
-				Context:      a.ctx,
+				Context:      ctx,
 				SystemPrompt: systemPrompt,
 				Messages:     history,
 				Tools:        toolSchemas,
 			})
 
-			assistantText, toolCalls, stopReason, usage, err := a.handleStream(events, errs, agentEventCh)
+			assistantText, toolCalls, stopReason, usage, err := a.handleStream(ctx, events, errs, agentEventCh)
 			if err != nil {
-				sendAgentEvent(a.ctx, agentEventCh, ErrorEvent{Err: err})
+				sendAgentEvent(ctx, agentEventCh, ErrorEvent{Err: err})
 				return
 			}
 
@@ -103,12 +130,12 @@ func (a *Agent) Run(mm *message.MessageManager) <-chan AgentEvent {
 					})
 				}
 				if a.contextManager != nil {
-					if err := a.contextManager.SyncHistory(a.ctx, a.sessionID, mm.History); err != nil {
-						sendAgentEvent(a.ctx, agentEventCh, ErrorEvent{Err: err})
+					if err := a.contextManager.SyncHistory(ctx, a.sessionID, mm.History); err != nil {
+						sendAgentEvent(ctx, agentEventCh, ErrorEvent{Err: err})
 						return
 					}
 				}
-				sendAgentEvent(a.ctx, agentEventCh, DoneEvent{StopReason: stopReason, Usage: addUsage(totalUsage, usage)})
+				sendAgentEvent(ctx, agentEventCh, DoneEvent{StopReason: stopReason, Usage: addUsage(totalUsage, usage)})
 				return
 			}
 			totalUsage = addUsage(totalUsage, usage)
@@ -119,11 +146,11 @@ func (a *Agent) Run(mm *message.MessageManager) <-chan AgentEvent {
 				ToolUses: toToolUseBlocks(toolCalls),
 			})
 
-			toolResults := a.executeTools(toolCalls, agentEventCh)
+			toolResults := a.executeTools(ctx, toolCalls, agentEventCh)
 			mm.AddToolResult(toolResults)
 		}
 
-		sendAgentEvent(a.ctx, agentEventCh, ErrorEvent{Err: fmt.Errorf("agent loop exceeded max iterations %d", a.MaxIterations)})
+		sendAgentEvent(ctx, agentEventCh, ErrorEvent{Err: fmt.Errorf("agent loop exceeded max iterations %d", a.MaxIterations)})
 	}()
 
 	return agentEventCh
@@ -165,7 +192,7 @@ func (a *Agent) validate(mm *message.MessageManager) error {
 	return nil
 }
 
-func (a *Agent) handleStream(events <-chan llm.StreamEvent, errs <-chan error, out chan<- AgentEvent) (string, []llm.ToolCallComplete, string, llm.UsageInfo, error) {
+func (a *Agent) handleStream(ctx context.Context, events <-chan llm.StreamEvent, errs <-chan error, out chan<- AgentEvent) (string, []llm.ToolCallComplete, string, llm.UsageInfo, error) {
 	var assistantText strings.Builder
 	var toolCalls []llm.ToolCallComplete
 	stopReason := ""
@@ -181,16 +208,16 @@ func (a *Agent) handleStream(events <-chan llm.StreamEvent, errs <-chan error, o
 			switch ev := event.(type) {
 			case llm.TextStream:
 				assistantText.WriteString(ev.Text)
-				sendAgentEvent(a.ctx, out, TextEvent{Text: ev.Text})
+				sendAgentEvent(ctx, out, TextEvent{Text: ev.Text})
 			case llm.ThinkingStream:
-				sendAgentEvent(a.ctx, out, ThinkingEvent{Text: ev.Text})
+				sendAgentEvent(ctx, out, ThinkingEvent{Text: ev.Text})
 			case llm.ToolCallStart:
-				sendAgentEvent(a.ctx, out, ToolCallStartEvent{ToolUseID: ev.ToolID, ToolName: ev.ToolName})
+				sendAgentEvent(ctx, out, ToolCallStartEvent{ToolUseID: ev.ToolID, ToolName: ev.ToolName})
 			case llm.ToolCallStream:
-				sendAgentEvent(a.ctx, out, ToolCallDeltaEvent{ToolUseID: ev.ToolID, Text: ev.Text})
+				sendAgentEvent(ctx, out, ToolCallDeltaEvent{ToolUseID: ev.ToolID, Text: ev.Text})
 			case llm.ToolCallComplete:
 				toolCalls = append(toolCalls, ev)
-				sendAgentEvent(a.ctx, out, ToolCallCompleteEvent{ToolUseID: ev.ToolID, ToolName: ev.ToolName, Arguments: ev.Arguments})
+				sendAgentEvent(ctx, out, ToolCallCompleteEvent{ToolUseID: ev.ToolID, ToolName: ev.ToolName, Arguments: ev.Arguments})
 			case llm.StreamEnd:
 				stopReason = ev.StopReason
 				usage = ev.Usage
@@ -203,8 +230,8 @@ func (a *Agent) handleStream(events <-chan llm.StreamEvent, errs <-chan error, o
 			if err != nil {
 				return assistantText.String(), toolCalls, stopReason, usage, err
 			}
-		case <-a.ctx.Done():
-			return assistantText.String(), toolCalls, stopReason, usage, a.ctx.Err()
+		case <-ctx.Done():
+			return assistantText.String(), toolCalls, stopReason, usage, ctx.Err()
 		}
 	}
 
@@ -221,12 +248,12 @@ func addUsage(u, other llm.UsageInfo) llm.UsageInfo {
 	}
 }
 
-func (a *Agent) executeTool(call llm.ToolCallComplete) tool.ToolResult {
+func (a *Agent) executeTool(ctx context.Context, call llm.ToolCallComplete) tool.ToolResult {
 	if call.ToolID == "" || call.ToolName == "" {
 		return tool.ToolResult{Output: "tool call is missing id or name", IsError: true}
 	}
 
-	return a.toolManager.Execute(a.ctx, call.ToolName, call.Arguments)
+	return a.toolManager.Execute(ctx, call.ToolName, call.Arguments)
 }
 
 type completedToolCall struct {
@@ -238,23 +265,32 @@ type completedToolCall struct {
 // executeTools starts every tool call in an iteration concurrently. Results are
 // returned in call order because tool-result protocols associate the response
 // sequence with the corresponding assistant tool-use sequence.
-func (a *Agent) executeTools(calls []llm.ToolCallComplete, events chan<- AgentEvent) []message.ToolResultBlock {
+func (a *Agent) executeTools(ctx context.Context, calls []llm.ToolCallComplete, events chan<- AgentEvent) []message.ToolResultBlock {
 	completed := make(chan completedToolCall, len(calls))
 	for index, call := range calls {
+		sendAgentEvent(ctx, events, ToolExecutionStartEvent{
+			ToolUseID: call.ToolID,
+			ToolName:  call.ToolName,
+		})
 		go func(index int, call llm.ToolCallComplete) {
-			completed <- completedToolCall{index: index, call: call, result: a.executeTool(call)}
+			completed <- completedToolCall{index: index, call: call, result: a.executeTool(ctx, call)}
 		}(index, call)
 	}
 
 	results := make([]message.ToolResultBlock, len(calls))
 	for range calls {
-		outcome := <-completed
+		var outcome completedToolCall
+		select {
+		case outcome = <-completed:
+		case <-ctx.Done():
+			return results
+		}
 		results[outcome.index] = message.ToolResultBlock{
 			ToolUseID: outcome.call.ToolID,
 			Content:   outcome.result.Output,
 			IsError:   outcome.result.IsError,
 		}
-		sendAgentEvent(a.ctx, events, ToolResultEvent{
+		sendAgentEvent(ctx, events, ToolResultEvent{
 			ToolUseID: outcome.call.ToolID,
 			ToolName:  outcome.call.ToolName,
 			Content:   outcome.result.Output,
@@ -279,6 +315,9 @@ func toToolUseBlocks(toolCalls []llm.ToolCallComplete) []message.ToolUseBlock {
 func sendAgentEvent(ctx context.Context, ch chan<- AgentEvent, event AgentEvent) bool {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return false
 	}
 	select {
 	case ch <- event:

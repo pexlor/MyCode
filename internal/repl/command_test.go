@@ -19,6 +19,9 @@ func TestCommandRegistryDistinguishesTextAndUnknownCommands(t *testing.T) {
 	if got := registry.Execute(context.Background(), nil, "hello /ping"); got.Handled {
 		t.Fatal("ordinary text was handled")
 	}
+	if got := registry.Execute(context.Background(), nil, "exit"); got.Handled || got.Quit {
+		t.Fatalf("bare exit must be ordinary text: %#v", got)
+	}
 	if got := registry.Execute(context.Background(), nil, "/missing"); !got.Handled || got.Err == nil {
 		t.Fatalf("result = %#v", got)
 	}
@@ -99,6 +102,43 @@ func TestNewRenameCurrentAndExitCommands(t *testing.T) {
 	if result := registry.Execute(context.Background(), commandContext, "/exit"); !result.Quit {
 		t.Fatalf("result = %#v", result)
 	}
+}
+
+func TestThinkingCommandChangesSubsequentRequestMode(t *testing.T) {
+	registry, err := NewDefaultCommandRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	thinking := &testThinkingController{}
+	var output bytes.Buffer
+	commandContext := &CommandContext{Out: &output, Registry: registry, Thinking: thinking}
+	for _, input := range []string{"/thinking", "/thinking on", "/thinking status", "/thinking off"} {
+		if result := registry.Execute(context.Background(), commandContext, input); result.Err != nil {
+			t.Fatalf("%s: %v", input, result.Err)
+		}
+	}
+	if thinking.enabled {
+		t.Fatal("thinking remains enabled after /thinking off")
+	}
+	for _, want := range []string{"thinking: off", "thinking: on (applies to subsequent requests)", "thinking: on"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("output %q does not contain %q", output.String(), want)
+		}
+	}
+	if result := registry.Execute(context.Background(), commandContext, "/thinking maybe"); result.Err == nil {
+		t.Fatal("invalid thinking mode succeeded")
+	}
+}
+
+type testThinkingController struct{ enabled bool }
+
+func (controller *testThinkingController) SetThinkingEnabled(enabled bool) error {
+	controller.enabled = enabled
+	return nil
+}
+
+func (controller *testThinkingController) ThinkingEnabled() (bool, error) {
+	return controller.enabled, nil
 }
 
 func TestShortIDOmitsFixedSessionPrefix(t *testing.T) {

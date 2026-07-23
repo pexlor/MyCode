@@ -12,6 +12,11 @@ type ThinkingEvent struct {
 	Text string
 }
 
+// ThinkingStartEvent indicates that the agent has started a model request.
+// It is emitted even when the provider does not expose reasoning tokens, so a
+// UI can still show that the conversation is making progress.
+type ThinkingStartEvent struct{}
+
 type ToolCallStartEvent struct {
 	ToolUseID string
 	ToolName  string
@@ -26,6 +31,14 @@ type ToolCallCompleteEvent struct {
 	ToolUseID string
 	ToolName  string
 	Arguments map[string]any
+}
+
+// ToolExecutionStartEvent is emitted immediately before a requested tool is
+// executed. ToolCallStartEvent only means that the model started describing a
+// call; this event represents the actual side effecting operation.
+type ToolExecutionStartEvent struct {
+	ToolUseID string
+	ToolName  string
 }
 
 type ToolResultEvent struct {
@@ -44,11 +57,13 @@ type ErrorEvent struct {
 	Err error
 }
 
-func (TextEvent) agentEvent()             {}
-func (ThinkingEvent) agentEvent()         {}
-func (ToolCallStartEvent) agentEvent()    {}
-func (ToolCallDeltaEvent) agentEvent()    {}
-func (ToolCallCompleteEvent) agentEvent() {}
-func (ToolResultEvent) agentEvent()       {}
-func (DoneEvent) agentEvent()             {}
-func (ErrorEvent) agentEvent()            {}
+func (TextEvent) agentEvent()               {}
+func (ThinkingEvent) agentEvent()           {}
+func (ThinkingStartEvent) agentEvent()      {}
+func (ToolCallStartEvent) agentEvent()      {}
+func (ToolCallDeltaEvent) agentEvent()      {}
+func (ToolCallCompleteEvent) agentEvent()   {}
+func (ToolExecutionStartEvent) agentEvent() {}
+func (ToolResultEvent) agentEvent()         {}
+func (DoneEvent) agentEvent()               {}
+func (ErrorEvent) agentEvent()              {}

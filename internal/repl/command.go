@@ -31,6 +31,13 @@ type CommandContext struct {
 	Registry        *CommandRegistry
 	Clear           func(io.Writer)
 	OnSessionChange func(string)
+	Thinking        ThinkingController
+}
+
+// ThinkingController changes the thinking mode of future model requests.
+type ThinkingController interface {
+	SetThinkingEnabled(bool) error
+	ThinkingEnabled() (bool, error)
 }
 
 type CommandResult struct {
@@ -61,9 +68,6 @@ func (r *CommandRegistry) Execute(ctx context.Context, commandContext *CommandCo
 	if input == "" {
 		return CommandResult{}
 	}
-	if strings.EqualFold(input, "exit") || strings.EqualFold(input, "quit") {
-		input = "/exit"
-	}
 	if !strings.HasPrefix(input, "/") {
 		return CommandResult{}
 	}
@@ -90,6 +94,7 @@ func NewDefaultCommandRegistry() (*CommandRegistry, error) {
 		{Name: "delete", Usage: "/delete <id>", Description: "删除非当前会话", Run: runDelete},
 		{Name: "rename", Usage: "/rename <标题>", Description: "重命名当前会话", Run: runRename},
 		{Name: "current", Usage: "/current", Description: "显示当前会话", Run: runCurrent},
+		{Name: "thinking", Usage: "/thinking [on|off|status]", Description: "查看或切换后续回复的思考模式", Run: runThinking},
 		{Name: "clear", Usage: "/clear", Description: "清理屏幕但保留上下文", Run: runClear},
 		{Name: "exit", Usage: "/exit", Description: "退出 MyCode", Run: func(context.Context, *CommandContext, string) CommandResult { return CommandResult{Quit: true} }},
 		{Name: "quit", Usage: "/quit", Description: "退出 MyCode", Run: func(context.Context, *CommandContext, string) CommandResult { return CommandResult{Quit: true} }},
@@ -222,6 +227,39 @@ func runClear(_ context.Context, commandContext *CommandContext, arguments strin
 	if commandContext.Clear != nil {
 		commandContext.Clear(commandContext.Out)
 	}
+	return CommandResult{}
+}
+
+func runThinking(_ context.Context, commandContext *CommandContext, arguments string) CommandResult {
+	if commandContext == nil || commandContext.Thinking == nil || commandContext.Out == nil {
+		return CommandResult{Err: errors.New("thinking mode control is unavailable")}
+	}
+	mode := strings.ToLower(strings.TrimSpace(arguments))
+	if mode == "" || mode == "status" {
+		enabled, err := commandContext.Thinking.ThinkingEnabled()
+		if err != nil {
+			return CommandResult{Err: err}
+		}
+		state := "off"
+		if enabled {
+			state = "on"
+		}
+		fmt.Fprintf(commandContext.Out, "thinking: %s\n", state)
+		return CommandResult{}
+	}
+	var enabled bool
+	switch mode {
+	case "on":
+		enabled = true
+	case "off":
+		enabled = false
+	default:
+		return CommandResult{Err: errors.New("usage: /thinking [on|off|status]")}
+	}
+	if err := commandContext.Thinking.SetThinkingEnabled(enabled); err != nil {
+		return CommandResult{Err: err}
+	}
+	fmt.Fprintf(commandContext.Out, "thinking: %s (applies to subsequent requests)\n", mode)
 	return CommandResult{}
 }
 

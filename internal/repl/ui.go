@@ -14,8 +14,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+
+	"charm.land/glamour/v2"
+	"charm.land/glamour/v2/styles"
+	"charm.land/lipgloss/v2"
 )
 
 const (
@@ -27,6 +32,10 @@ const (
 	colorGray  = "\033[90m"
 	colorWhite = "\033[97m"
 	colorBold  = "\033[1m"
+
+	thinkingBoxContentWidth = 64
+	thinkingBoxLineCount    = 4
+	thinkingBoxHeight       = thinkingBoxLineCount + 2
 )
 
 type lineInput interface {
@@ -101,8 +110,11 @@ func runInteractive() {
 	}
 	input := openLineInput(registry)
 	defer input.Close()
+	interrupts := make(chan os.Signal, 1)
+	signal.Notify(interrupts, os.Interrupt)
+	defer signal.Stop(interrupts)
 	runtime.runner.SetContextManager(runtime.contextManager, sessions.Current().ID)
-	commandContext := &CommandContext{Sessions: sessions, In: reader, Out: os.Stdout, Registry: registry, Clear: func(out io.Writer) {
+	commandContext := &CommandContext{Sessions: sessions, In: reader, Out: os.Stdout, Registry: registry, Thinking: runtime.runner, Clear: func(out io.Writer) {
 		fmt.Fprint(out, "\033[H\033[2J")
 		printWelcomeTo(out, config.Model.Name, workspace)
 	}, OnSessionChange: func(sessionID string) {
@@ -117,8 +129,8 @@ func runInteractive() {
 				return
 			}
 			if errors.Is(err, errPromptAborted) {
-				fmt.Println(dim("  输入已取消"))
-				continue
+				fmt.Println(dim("bye."))
+				return
 			}
 			printError("读取输入失败", err)
 			return
@@ -145,14 +157,35 @@ func runInteractive() {
 			printError("保存消息失败", err)
 			continue
 		}
-		fmt.Print(assistantLabel())
+		renderer := newAgentEventRenderer(os.Stderr, os.Stdout)
 		failed := false
-		for event := range runtime.runner.Run(sessions.Current().Messages) {
-			if err := handleAgentEvent(event); err != nil {
-				printError("执行失败", err)
-				failed = true
-				break
+		interrupted := false
+		turnContext, cancelTurn := context.WithCancel(context.Background())
+		events := runtime.runner.RunContext(turnContext, sessions.Current().Messages)
+	eventLoop:
+		for {
+			select {
+			case <-interrupts:
+				cancelTurn()
+				interrupted = true
+				break eventLoop
+			case event, ok := <-events:
+				if !ok {
+					break eventLoop
+				}
+				if err := renderer.render(event); err != nil {
+					printError("执行失败", err)
+					failed = true
+					break eventLoop
+				}
 			}
+		}
+		cancelTurn()
+		if interrupted {
+			renderer.clearStatus()
+			renderer.finishThinking()
+			fmt.Fprintln(os.Stderr, dim("  对话已中断"))
+			continue
 		}
 		if failed {
 			continue
@@ -234,51 +267,165 @@ func initAgent(config appconfig.Config) (*agentRuntime, error) {
 
 func modelParameters(model appconfig.ModelConfig) *llm.ModelParm {
 	return &llm.ModelParm{
-		Protocol:  model.Protocol,
-		BaseURL:   model.BaseURL,
-		APIKey:    model.APIKey,
-		ModelName: model.Name,
-		MaxToken:  int64(model.MaxTokens),
+		Protocol:       model.Protocol,
+		BaseURL:        model.BaseURL,
+		APIKey:         model.APIKey,
+		ModelName:      model.Name,
+		MaxToken:       int64(model.MaxTokens),
+		EnableThinking: model.EnableThinking,
 	}
 }
 
 func handleAgentEvent(event agent.AgentEvent) error {
+	return newAgentEventRenderer(os.Stderr, os.Stdout).render(event)
+}
+
+// agentEventRenderer draws transient progress on the current terminal line.
+// It clears that line as soon as output arrives, so conversation-state labels
+// do not become part of the transcript.
+type agentEventRenderer struct {
+	statusOut        io.Writer
+	textOut          io.Writer
+	statusVisible    bool
+	thinkingVisible  bool
+	assistantStarted bool
+	thinking         strings.Builder
+	assistantText    strings.Builder
+	markdownRenderer *glamour.TermRenderer
+}
+
+func newAgentEventRenderer(statusOut, textOut io.Writer) *agentEventRenderer {
+	markdownRenderer, _ := glamour.NewTermRenderer(glamour.WithStandardStyle(styles.DarkStyle), glamour.WithWordWrap(80))
+	return &agentEventRenderer{statusOut: statusOut, textOut: textOut, markdownRenderer: markdownRenderer}
+}
+
+func (renderer *agentEventRenderer) render(event agent.AgentEvent) error {
 	switch ev := event.(type) {
 	case agent.TextEvent:
-		fmt.Print(ev.Text)
+		renderer.clearStatus()
+		renderer.finishThinking()
+		renderer.assistantText.WriteString(ev.Text)
+	case agent.ThinkingStartEvent:
+		renderer.showStatus(conversationStatus("正在思考"))
 	case agent.ThinkingEvent:
-		if strings.TrimSpace(ev.Text) != "" {
-			fmt.Fprintf(os.Stderr, "%s%s%s", colorGray, ev.Text, colorReset)
-		}
-	case agent.ToolCallStartEvent:
-		fmt.Fprintf(os.Stderr, "\n%s%s%s\n", colorDim, toolLine("running", ev.ToolName), colorReset)
-	case agent.ToolCallCompleteEvent:
-		if len(ev.Arguments) > 0 {
-			fmt.Fprintf(os.Stderr, "%s%s%s\n", colorDim, toolLine("args", ev.ToolName), colorReset)
-		}
+		renderer.clearStatus()
+		renderer.thinking.WriteString(ev.Text)
+		renderer.renderThinkingBox()
+	case agent.ToolExecutionStartEvent:
+		renderer.finishThinking()
+		renderer.renderAssistantMarkdown()
+		renderer.showStatus(toolLine("正在调用", ev.ToolName))
 	case agent.ToolResultEvent:
+		renderer.clearStatus()
+		renderer.finishThinking()
 		status := "ok"
 		color := colorGreen
 		if ev.IsError {
 			status = "error"
 			color = colorRed
 		}
-		fmt.Fprintf(os.Stderr, "%s%s%s %s%s%s\n", colorDim, toolLine("result", ev.ToolName), colorReset, color, status, colorReset)
+		fmt.Fprintf(renderer.statusOut, "%s%s%s %s%s%s\n", colorDim, toolLine("完成", ev.ToolName), colorReset, color, status, colorReset)
 	case agent.DoneEvent:
-		fmt.Fprintf(os.Stderr, "\n%stokens: input %d | output %d | total %d", colorDim, ev.Usage.InputTokens, ev.Usage.OutputTokens, ev.Usage.TotalTokens)
+		renderer.clearStatus()
+		renderer.finishThinking()
+		renderer.renderAssistantMarkdown()
+		fmt.Fprintf(renderer.statusOut, "\n%stokens: input %d | output %d | total %d", colorDim, ev.Usage.InputTokens, ev.Usage.OutputTokens, ev.Usage.TotalTokens)
 		if ev.Usage.CacheReadTokens > 0 {
-			fmt.Fprintf(os.Stderr, " | cache read %d", ev.Usage.CacheReadTokens)
+			fmt.Fprintf(renderer.statusOut, " | cache read %d", ev.Usage.CacheReadTokens)
 		}
-		fmt.Fprint(os.Stderr, colorReset)
+		fmt.Fprint(renderer.statusOut, colorReset)
 		if ev.StopReason != "" {
-			fmt.Fprintf(os.Stderr, "\n%sdone: %s%s\n\n", colorDim, ev.StopReason, colorReset)
+			fmt.Fprintf(renderer.statusOut, "\n%sdone: %s%s\n\n", colorDim, ev.StopReason, colorReset)
 		} else {
-			fmt.Println()
+			fmt.Fprintln(renderer.statusOut)
 		}
 	case agent.ErrorEvent:
 		return ev.Err
 	}
 	return nil
+}
+
+func (renderer *agentEventRenderer) renderAssistantMarkdown() {
+	markdown := renderer.assistantText.String()
+	if markdown == "" {
+		return
+	}
+	renderer.assistantText.Reset()
+	if !renderer.assistantStarted {
+		fmt.Fprint(renderer.textOut, assistantLabel())
+		renderer.assistantStarted = true
+	}
+	if renderer.markdownRenderer == nil {
+		fmt.Fprint(renderer.textOut, markdown)
+		return
+	}
+	rendered, err := renderer.markdownRenderer.Render(markdown)
+	if err != nil {
+		fmt.Fprint(renderer.textOut, markdown)
+		return
+	}
+	fmt.Fprint(renderer.textOut, rendered)
+}
+
+func (renderer *agentEventRenderer) showStatus(status string) {
+	renderer.clearStatus()
+	fmt.Fprintf(renderer.statusOut, "\r\033[2K%s%s%s", colorDim, status, colorReset)
+	renderer.statusVisible = true
+}
+
+func (renderer *agentEventRenderer) clearStatus() {
+	if renderer.statusVisible {
+		fmt.Fprint(renderer.statusOut, "\r\033[2K")
+		renderer.statusVisible = false
+	}
+}
+
+func (renderer *agentEventRenderer) finishThinking() {
+	if renderer.thinkingVisible {
+		renderer.thinkingVisible = false
+	}
+}
+
+// renderThinkingBox redraws a fixed-height viewport in place. The box keeps
+// the terminal transcript compact while the most recent reasoning lines remain
+// visible during generation.
+func (renderer *agentEventRenderer) renderThinkingBox() {
+	if renderer.thinkingVisible {
+		fmt.Fprintf(renderer.statusOut, "\033[%dA", thinkingBoxHeight)
+	}
+	lines := recentThinkingLines(renderer.thinking.String(), thinkingBoxContentWidth, thinkingBoxLineCount)
+	titleFill := strings.Repeat("─", thinkingBoxContentWidth-lipgloss.Width(" 思考 "))
+	fmt.Fprintf(renderer.statusOut, "\r\033[2K%s┌─ 思考 %s┐%s\n", colorGray, titleFill, colorReset)
+	for _, line := range lines {
+		padding := strings.Repeat(" ", thinkingBoxContentWidth-lipgloss.Width(line))
+		fmt.Fprintf(renderer.statusOut, "\r\033[2K%s│%s%s│%s\n", colorGray, line, padding, colorReset)
+	}
+	fmt.Fprintf(renderer.statusOut, "\r\033[2K%s└%s┘%s\n", colorGray, strings.Repeat("─", thinkingBoxContentWidth), colorReset)
+	renderer.thinkingVisible = true
+}
+
+func recentThinkingLines(text string, width, limit int) []string {
+	lines := make([]string, 0, limit)
+	for _, sourceLine := range strings.Split(text, "\n") {
+		current := ""
+		for _, runeValue := range sourceLine {
+			candidate := current + string(runeValue)
+			if lipgloss.Width(candidate) > width && current != "" {
+				lines = append(lines, current)
+				current = string(runeValue)
+			} else {
+				current = candidate
+			}
+		}
+		lines = append(lines, current)
+	}
+	if len(lines) > limit {
+		lines = lines[len(lines)-limit:]
+	}
+	for len(lines) < limit {
+		lines = append([]string{""}, lines...)
+	}
+	return lines
 }
 
 func printWelcomeTo(out io.Writer, modelName, workspace string) {
@@ -298,7 +445,7 @@ func promptLabel() string {
 }
 
 func assistantLabel() string {
-	return "\n" + colorCyan + colorBold + "●" + colorReset + " "
+	return colorCyan + colorBold + "●" + colorReset + " "
 }
 
 func printError(label string, err error) {
@@ -312,7 +459,11 @@ func toolLine(action string, toolName string) string {
 	if toolName == "" {
 		toolName = "tool"
 	}
-	return fmt.Sprintf("tool %s: %s", action, toolName)
+	return fmt.Sprintf("  · 工具%s：%s", action, toolName)
+}
+
+func conversationStatus(status string) string {
+	return "  · " + status + "…"
 }
 
 func dim(text string) string {

@@ -3,7 +3,9 @@ package tool
 import (
 	"MyCode/internal/permission"
 	"context"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -68,6 +70,30 @@ func TestExecuteUsesResolvedFilePath(t *testing.T) {
 	if arguments["file_path"] != want {
 		t.Fatalf("resolved file_path = %#v, want %q", arguments["file_path"], want)
 	}
+}
+
+func TestExecutePreservesPermissionDecisionWhenAuthorizationErrors(t *testing.T) {
+	tools := NewToolsManager()
+	tools.RegisterTool(&testTool{})
+	tools.SetPermissionManager(permissionManagerFunc(func(context.Context, permission.PermissionRequest) (permission.PermissionResult, error) {
+		return permission.PermissionResult{Decision: permission.Deny, Reason: "audit denied access"}, errors.New("audit sink unavailable")
+	}))
+
+	result := tools.Execute(context.Background(), "ReadTest", map[string]any{})
+	if !result.IsError {
+		t.Fatalf("result = %#v, want error", result)
+	}
+	for _, want := range []string{"permission deny: audit denied access", "permission check failed: audit sink unavailable"} {
+		if !strings.Contains(result.Output, want) {
+			t.Fatalf("result output = %q, missing %q", result.Output, want)
+		}
+	}
+}
+
+type permissionManagerFunc func(context.Context, permission.PermissionRequest) (permission.PermissionResult, error)
+
+func (f permissionManagerFunc) Authorize(ctx context.Context, req permission.PermissionRequest) (permission.PermissionResult, error) {
+	return f(ctx, req)
 }
 
 func TestBuildSchemasReturnsRequestedSubset(t *testing.T) {

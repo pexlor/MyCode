@@ -32,8 +32,12 @@ func TestAgentExecutesToolCallsConcurrently(t *testing.T) {
 	}
 	started := time.Now()
 	var resultIDs []string
+	var executionStartIDs []string
 	var usage llm.UsageInfo
 	for event := range runner.Run(&message.MessageManager{SystemPrompt: "test"}) {
+		if start, ok := event.(ToolExecutionStartEvent); ok {
+			executionStartIDs = append(executionStartIDs, start.ToolUseID)
+		}
 		if result, ok := event.(ToolResultEvent); ok {
 			resultIDs = append(resultIDs, result.ToolUseID)
 		}
@@ -51,6 +55,9 @@ func TestAgentExecutesToolCallsConcurrently(t *testing.T) {
 	}
 	if len(resultIDs) != callCount {
 		t.Fatalf("received %d tool result events, want %d", len(resultIDs), callCount)
+	}
+	if len(executionStartIDs) != callCount {
+		t.Fatalf("received %d tool execution start events, want %d", len(executionStartIDs), callCount)
 	}
 	if usage != (llm.UsageInfo{InputTokens: 30, OutputTokens: 7, TotalTokens: 37}) {
 		t.Fatalf("usage = %#v, want input 30, output 7, total 37", usage)

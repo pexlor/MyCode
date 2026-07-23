@@ -24,6 +24,13 @@ type LLMClient interface {
 	Stream(req *StreamRequest) (<-chan StreamEvent, <-chan error)
 }
 
+// ThinkingModeController is implemented by providers whose thinking mode can
+// be changed between requests.
+type ThinkingModeController interface {
+	SetThinkingEnabled(enabled bool)
+	ThinkingEnabled() bool
+}
+
 // 对话模型参数
 type ModelParm struct {
 	Protocol  string
@@ -37,7 +44,7 @@ type ModelParm struct {
 	TopP float64
 	Temp float64
 
-	Tinking bool
+	EnableThinking bool
 
 	MaxToken      int64
 	ContextWindow int64

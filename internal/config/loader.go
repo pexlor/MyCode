@@ -59,6 +59,9 @@ func applyEnvironment(config *Config) error {
 	config.Model.BaseURL = envString(config.Model.BaseURL, "MYCODE_BASE_URL", "ANTHROPIC_BASE_URL")
 	config.Model.APIKey = envString(config.Model.APIKey, "MYCODE_API_KEY", "ANTHROPIC_API_KEY")
 	config.Model.Name = envString(config.Model.Name, "MYCODE_MODEL")
+	if err := envBool(&config.Model.EnableThinking, "MYCODE_ENABLE_THINKING"); err != nil {
+		return err
+	}
 	config.Summary.Model = envString(config.Summary.Model, "MYCODE_SUMMARY_MODEL")
 	config.Summary.BaseURL = envString(config.Summary.BaseURL, "MYCODE_SUMMARY_BASE_URL")
 	config.Summary.APIKey = envString(config.Summary.APIKey, "MYCODE_SUMMARY_API_KEY")
@@ -82,6 +85,19 @@ func applyEnvironment(config *Config) error {
 		}
 		*override.destination = parsed
 	}
+	return nil
+}
+
+func envBool(destination *bool, name string) error {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fmt.Errorf("environment variable %s has invalid boolean %q", name, value)
+	}
+	*destination = parsed
 	return nil
 }
 

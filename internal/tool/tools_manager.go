@@ -51,6 +51,13 @@ func (m *ToolsManager) Execute(ctx context.Context, name string, args map[string
 	req := buildPermissionRequest(name, args)
 	result, err := m.permissions.Authorize(ctx, req)
 	if err != nil {
+		// An authorization error can still include a decision and reason (for
+		// example, when an audit write fails after a policy denial). Keep that
+		// information in the tool result so the next model request can explain
+		// why the call was not run instead of retrying blindly.
+		if result.Decision != "" || result.Reason != "" {
+			return ToolResult{Output: fmt.Sprintf("permission %s: %s (permission check failed: %v)", result.Decision, result.Reason, err), IsError: true}
+		}
 		return ToolResult{Output: fmt.Sprintf("permission check failed: %v", err), IsError: true}
 	}
 	if result.Decision != permission.Allow {
