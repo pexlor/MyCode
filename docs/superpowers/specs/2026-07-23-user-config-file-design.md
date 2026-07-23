@@ -70,7 +70,7 @@ context:
 | `MYCODE_SUMMARY_BASE_URL` | `summary.base_url` |
 | `MYCODE_SUMMARY_API_KEY` | `summary.api_key` |
 | `MYCODE_CONTEXT_WINDOW` | `context.window` |
-| `MYCODE_OUTPUT_RESERVE` | `context.output_reserve` |
+| `MYCODE_MAX_OUTPUT_TOKENS` | `context.output_reserve` |
 
 同一字段存在两种历史环境变量时，协议专用变量优先于 `MYCODE_*` 变量。`MYCODE_BASH` 继续只通过环境变量读取，因为它描述当前运行环境，而不是模型配置。
 
