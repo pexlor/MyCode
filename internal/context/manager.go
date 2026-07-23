@@ -300,9 +300,21 @@ func (m *ContextManager) renderView(systemPrompt string, active *SummarySnapshot
 
 // activePaths 从工具参数中提取本轮真实操作过的文件路径，用于加载路径级规则。
 func activePaths(messages []StoredMessage) []string {
+	successfulToolUses := make(map[string]struct{})
+	for _, item := range messages {
+		for _, result := range item.ToolResults {
+			if result.ToolUseID != "" && !result.IsError {
+				successfulToolUses[result.ToolUseID] = struct{}{}
+			}
+		}
+	}
+
 	var paths []string
 	for _, item := range messages {
 		for _, use := range item.ToolUses {
+			if _, ok := successfulToolUses[use.ToolUseID]; !ok {
+				continue
+			}
 			for key, value := range use.Arguments {
 				lower := strings.ToLower(key)
 				if !strings.Contains(lower, "path") && !strings.Contains(lower, "file") && !strings.Contains(lower, "directory") {

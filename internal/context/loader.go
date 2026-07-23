@@ -42,7 +42,7 @@ func (l DemandLoader) LoadRules(activePaths []string) ([]LoadedRule, error) {
 		absolute = filepath.Clean(absolute)
 		relative, err := filepath.Rel(workspace, absolute)
 		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			return nil, errors.New("active path is outside workspace")
+			continue
 		}
 		directory := filepath.Dir(absolute)
 		for {
@@ -78,48 +78,10 @@ func (l DemandLoader) LoadRules(activePaths []string) ([]LoadedRule, error) {
 	return rules, nil
 }
 
-// SelectTools 使用确定性关键词选择本轮要暴露给模型的工具 schema。
-// 这里只减少模型可见定义，不改变工具注册状态，更不会绕过 ToolsManager 的权限检查。
-func (DemandLoader) SelectTools(request string, activeToolNames []string, all []*tool.ToolSchema) []*tool.ToolSchema {
-	lower := strings.ToLower(request)
-	if strings.TrimSpace(lower) == "" {
-		// 无法判断意图时回退到全部工具，优先保证能力可达。
-		return append([]*tool.ToolSchema(nil), all...)
-	}
-	selected := make(map[string]bool)
-	for _, name := range []string{"ReadFile", "Grep", "Glob"} {
-		selected[name] = true
-	}
-	for _, name := range activeToolNames {
-		selected[name] = true
-	}
-	if containsAny(lower, "edit", "write", "modify", "fix", "refactor", "修改", "写入", "实现", "修复", "重构") {
-		selected["WriteFile"] = true
-		selected["EditFile"] = true
-	}
-	if containsAny(lower, "run", "test", "build", "command", "执行", "运行", "测试", "构建", "命令") {
-		selected["Bash"] = true
-	}
-	var result []*tool.ToolSchema
-	for _, schema := range all {
-		if schema == nil {
-			continue
-		}
-		nameLower := strings.ToLower(schema.Name)
-		if selected[schema.Name] || (strings.HasPrefix(nameLower, "mcp") && strings.Contains(lower, nameLower)) {
-			result = append(result, schema)
-		}
-	}
-	return result
-}
-
-func containsAny(value string, candidates ...string) bool {
-	for _, candidate := range candidates {
-		if strings.Contains(value, candidate) {
-			return true
-		}
-	}
-	return false
+// SelectTools 返回本轮所有可用工具 schema。
+// 工具可见性不承担权限控制；所有调用仍由 ToolsManager 在执行阶段统一鉴权。
+func (DemandLoader) SelectTools(_ string, _ []string, all []*tool.ToolSchema) []*tool.ToolSchema {
+	return append([]*tool.ToolSchema(nil), all...)
 }
 
 func sortPathsByDepth(paths []string) {

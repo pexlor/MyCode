@@ -2,11 +2,38 @@ package contextmanager
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
 	"MyCode/internal/message"
 )
+
+func TestActivePathsIncludesOnlySuccessfulToolCalls(t *testing.T) {
+	messages := []StoredMessage{
+		{
+			Role: message.ASSISTANT,
+			ToolUses: []StoredToolUse{
+				{ToolUseID: "failed", ToolName: "ReadFile", Arguments: map[string]any{"file_path": "/outside/secret.go"}},
+				{ToolUseID: "successful", ToolName: "ReadFile", Arguments: map[string]any{"file_path": "internal/context/manager.go"}},
+				{ToolUseID: "pending", ToolName: "ReadFile", Arguments: map[string]any{"file_path": "/outside/pending.go"}},
+			},
+		},
+		{
+			Role: message.TOOL,
+			ToolResults: []StoredToolResult{
+				{ToolUseID: "failed", IsError: true},
+				{ToolUseID: "successful", IsError: false},
+			},
+		},
+	}
+
+	got := activePaths(messages)
+	want := []string{"internal/context/manager.go"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("activePaths() = %#v, want %#v", got, want)
+	}
+}
 
 func TestContextManagerBuildStartsAfterActiveCheckpoint(t *testing.T) {
 	store, _ := NewFileConversationStore(t.TempDir())

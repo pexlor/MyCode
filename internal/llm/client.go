@@ -44,9 +44,14 @@ type ModelParm struct {
 }
 
 func NewClient(parm *ModelParm) (LLMClient, error) {
+	if parm == nil {
+		return nil, fmt.Errorf("%w: model parameters cannot be nil", ErrInvalidConfig)
+	}
 	switch parm.Protocol {
 	case "openai-compat":
 		return newOpenAiCompatClient(parm)
+	case "anthropic":
+		return newAnthropicClient(parm)
 	default:
 		return nil, fmt.Errorf("unknown model protocol: %s", parm.Protocol)
 	}

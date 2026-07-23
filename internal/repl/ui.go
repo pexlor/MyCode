@@ -25,7 +25,38 @@ const (
 	colorGreen = "\033[32m"
 	colorRed   = "\033[31m"
 	colorGray  = "\033[90m"
+	colorWhite = "\033[97m"
+	colorBold  = "\033[1m"
 )
+
+type lineInput interface {
+	ReadLine(prompt string) (string, error)
+	Close() error
+}
+
+type streamLineInput struct{ reader *bufio.Reader }
+
+func newStreamLineInput(reader io.Reader) *streamLineInput {
+	return &streamLineInput{reader: bufio.NewReader(reader)}
+}
+
+func (input *streamLineInput) ReadLine(_ string) (string, error) {
+	line, err := input.reader.ReadString('\n')
+	if err != nil && !(errors.Is(err, io.EOF) && line != "") {
+		return "", err
+	}
+	return strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r"), nil
+}
+
+func (*streamLineInput) Close() error { return nil }
+
+func openLineInput(registry *CommandRegistry) lineInput {
+	info, err := os.Stdin.Stat()
+	if err == nil && info.Mode()&os.ModeCharDevice != 0 {
+		return newTerminalLineInput(registry)
+	}
+	return newStreamLineInput(os.Stdin)
+}
 
 func REPL() {
 	// 交互模式
@@ -39,8 +70,12 @@ func runInteractive() {
 		return
 	}
 	reader := bufio.NewReader(os.Stdin)
+	workspace, workspaceErr := os.Getwd()
+	if workspaceErr != nil {
+		workspace = "~"
+	}
 
-	printWelcomeTo(os.Stdout, config.Model.Name)
+	printWelcomeTo(os.Stdout, config.Model.Name, workspace)
 
 	systemPrompt, err := prompt.BuildSystemPrompt()
 	if err != nil {
@@ -64,21 +99,26 @@ func runInteractive() {
 		printError("命令初始化失败", err)
 		return
 	}
+	input := openLineInput(registry)
+	defer input.Close()
 	runtime.runner.SetContextManager(runtime.contextManager, sessions.Current().ID)
 	commandContext := &CommandContext{Sessions: sessions, In: reader, Out: os.Stdout, Registry: registry, Clear: func(out io.Writer) {
 		fmt.Fprint(out, "\033[H\033[2J")
-		printWelcomeTo(out, config.Model.Name)
+		printWelcomeTo(out, config.Model.Name, workspace)
 	}, OnSessionChange: func(sessionID string) {
 		runtime.runner.SetContextManager(runtime.contextManager, sessionID)
 	}}
 
 	for {
-		fmt.Print(promptLabel())
-		userInput, err := reader.ReadString('\n')
+		userInput, err := input.ReadLine(promptLabel())
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				fmt.Println(dim("bye."))
 				return
+			}
+			if errors.Is(err, errPromptAborted) {
+				fmt.Println(dim("  输入已取消"))
+				continue
 			}
 			printError("读取输入失败", err)
 			return
@@ -241,17 +281,24 @@ func handleAgentEvent(event agent.AgentEvent) error {
 	return nil
 }
 
-func printWelcomeTo(out io.Writer, modelName string) {
-	fmt.Fprintln(out, colorCyan+"MyCode CLI"+colorReset)
-	fmt.Fprintf(out, "%smodel: %s | /help for commands | /exit to quit%s\n\n", colorDim, modelName, colorReset)
+func printWelcomeTo(out io.Writer, modelName, workspace string) {
+	modelName = firstNonEmpty(modelName, "not configured")
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "  %s›_%s  %s%sMyCode%s\n", colorCyan, colorReset, colorBold, colorWhite, colorReset)
+	fmt.Fprintf(out, "  %s────────────────────────────────────────────────────────%s\n", colorGray, colorReset)
+	fmt.Fprintf(out, "  %smodel: %s%s\n", colorGray, modelName, colorReset)
+	fmt.Fprintf(out, "  %sdirectory: %s%s\n", colorGray, workspace, colorReset)
+	fmt.Fprintf(out, "  %s/help for commands  ·  /exit to quit%s\n\n", colorDim, colorReset)
 }
 
 func promptLabel() string {
-	return colorGreen + "you" + colorReset + colorDim + " > " + colorReset
+	// Keep the editable prompt free of ANSI bytes: line editors count prompt
+	// columns, and escape sequences would shift the cursor during CJK input.
+	return "› "
 }
 
 func assistantLabel() string {
-	return colorCyan + "assistant" + colorReset + colorDim + " > " + colorReset
+	return "\n" + colorCyan + colorBold + "●" + colorReset + " "
 }
 
 func printError(label string, err error) {
