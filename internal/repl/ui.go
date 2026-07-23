@@ -2,6 +2,7 @@ package repl
 
 import (
 	"MyCode/internal/agent"
+	appconfig "MyCode/internal/config"
 	contextmanager "MyCode/internal/context"
 	"MyCode/internal/llm"
 	"MyCode/internal/prompt"
@@ -14,13 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
-)
-
-const (
-	defaultBaseURL   = "https://llm-lgsv9uhdbprfr0vv.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
-	defaultModelName = "qwen-plus"
 )
 
 const (
@@ -38,16 +33,21 @@ func REPL() {
 }
 
 func runInteractive() {
+	config, err := appconfig.Load(os.Stderr)
+	if err != nil {
+		printError("配置加载失败", err)
+		return
+	}
 	reader := bufio.NewReader(os.Stdin)
 
-	printWelcome()
+	printWelcomeTo(os.Stdout, config.Model.Name)
 
 	systemPrompt, err := prompt.BuildSystemPrompt()
 	if err != nil {
 		printError("消息初始化失败", err)
 		return
 	}
-	runtime, err := initAgent()
+	runtime, err := initAgent(config)
 	if err != nil {
 		printError("agent 初始化失败", err)
 		return
@@ -67,7 +67,7 @@ func runInteractive() {
 	runtime.runner.SetContextManager(runtime.contextManager, sessions.Current().ID)
 	commandContext := &CommandContext{Sessions: sessions, In: reader, Out: os.Stdout, Registry: registry, Clear: func(out io.Writer) {
 		fmt.Fprint(out, "\033[H\033[2J")
-		printWelcomeTo(out)
+		printWelcomeTo(out, config.Model.Name)
 	}, OnSessionChange: func(sessionID string) {
 		runtime.runner.SetContextManager(runtime.contextManager, sessionID)
 	}}
@@ -128,23 +128,9 @@ type agentRuntime struct {
 	cleanup        func()
 }
 
-func initAgent() (*agentRuntime, error) {
-	// 模型凭据只从环境变量读取，禁止写入源码、配置文件或 Session 归档。
-	apiKey := os.Getenv("MYCODE_API_KEY")
-	if apiKey == "" {
-		return nil, fmt.Errorf("MYCODE_API_KEY is required")
-	}
-	protocol := "openai-compat"
-	baseURL := envOrDefault("MYCODE_BASE_URL", defaultBaseURL)
-	modelName := envOrDefault("MYCODE_MODEL", defaultModelName)
-
+func initAgent(config appconfig.Config) (*agentRuntime, error) {
 	// 构造llm客户端
-	client, err := llm.NewClient(&llm.ModelParm{
-		Protocol:  protocol,
-		BaseURL:   baseURL,
-		APIKey:    apiKey,
-		ModelName: modelName,
-	})
+	client, err := llm.NewClient(modelParameters(config.Model))
 
 	if err != nil {
 		return nil, err
@@ -175,18 +161,13 @@ func initAgent() (*agentRuntime, error) {
 	// 独立摘要模型是可选配置。配置后优先使用它，以便单独控制摘要成本和速度；
 	// 未配置或调用失败时，ContextManager 会回退当前对话模型一次。
 	var primary contextmanager.Summarizer
-	summaryModel := os.Getenv("MYCODE_SUMMARY_MODEL")
-	if summaryModel != "" {
-		summaryAPIKey := os.Getenv("MYCODE_SUMMARY_API_KEY")
-		if summaryAPIKey == "" {
-			cleanup()
-			return nil, fmt.Errorf("MYCODE_SUMMARY_API_KEY is required when MYCODE_SUMMARY_MODEL is set")
-		}
+	if config.Summary.Model != "" {
 		summaryClient, summaryErr := llm.NewClient(&llm.ModelParm{
-			Protocol:  protocol,
-			BaseURL:   envOrDefault("MYCODE_SUMMARY_BASE_URL", baseURL),
-			APIKey:    summaryAPIKey,
-			ModelName: summaryModel,
+			Protocol:  config.Model.Protocol,
+			BaseURL:   config.Summary.BaseURL,
+			APIKey:    config.Summary.APIKey,
+			ModelName: config.Summary.Model,
+			MaxToken:  int64(config.Model.MaxTokens),
 		})
 		if summaryErr != nil {
 			cleanup()
@@ -197,8 +178,8 @@ func initAgent() (*agentRuntime, error) {
 	contextManager, err := contextmanager.NewContextManager(contextmanager.ContextManagerConfig{
 		Store: store, Estimator: contextmanager.ConservativeEstimator{}, Policy: contextmanager.DefaultPolicy(),
 		Model: contextmanager.ModelContextSpec{
-			ModelName: modelName, ContextWindow: envInt("MYCODE_CONTEXT_WINDOW", 128000),
-			MaxOutputTokens: envInt("MYCODE_MAX_OUTPUT_TOKENS", 8192),
+			ModelName: config.Model.Name, ContextWindow: config.Context.Window,
+			MaxOutputTokens: config.Context.OutputReserve,
 		},
 		Workspace: workspace,
 		Primary:   primary,
@@ -211,25 +192,14 @@ func initAgent() (*agentRuntime, error) {
 	return &agentRuntime{runner: runner, contextManager: contextManager, store: store, workspace: workspace, cleanup: cleanup}, nil
 }
 
-func envOrDefault(name, fallback string) string {
-	// 空白环境变量视为未配置，避免把空字符串传给 LLM Client。
-	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
-		return value
+func modelParameters(model appconfig.ModelConfig) *llm.ModelParm {
+	return &llm.ModelParm{
+		Protocol:  model.Protocol,
+		BaseURL:   model.BaseURL,
+		APIKey:    model.APIKey,
+		ModelName: model.Name,
+		MaxToken:  int64(model.MaxTokens),
 	}
-	return fallback
-}
-
-func envInt(name string, fallback int) int {
-	// 非法或非正数配置使用安全默认值，保证预算计算始终拿到正整数。
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := strconv.Atoi(value)
-	if err != nil || parsed <= 0 {
-		return fallback
-	}
-	return parsed
 }
 
 func handleAgentEvent(event agent.AgentEvent) error {
@@ -271,13 +241,9 @@ func handleAgentEvent(event agent.AgentEvent) error {
 	return nil
 }
 
-func printWelcome() {
-	printWelcomeTo(os.Stdout)
-}
-
-func printWelcomeTo(out io.Writer) {
+func printWelcomeTo(out io.Writer, modelName string) {
 	fmt.Fprintln(out, colorCyan+"MyCode CLI"+colorReset)
-	fmt.Fprintf(out, "%smodel: %s | /help for commands | /exit to quit%s\n\n", colorDim, defaultModelName, colorReset)
+	fmt.Fprintf(out, "%smodel: %s | /help for commands | /exit to quit%s\n\n", colorDim, modelName, colorReset)
 }
 
 func promptLabel() string {
